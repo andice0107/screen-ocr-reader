@@ -10,7 +10,9 @@
   `G:\我的雲端硬碟\claude\雜務專區\MSI Claw 8 AI+\生成電腦版軟體-截圖文字辨識報讀程式\`
   （裡面有 `ScreenOCRReader.exe`、`使用說明.md`、`原始碼\` 備份）
 - 本機開發資料夾：`C:\dev\screen-ocr-reader`（含 `.venv`；不要在 G: 雲端硬碟裡打包，檔案太多同步很慢）
+- 使用者**平常執行的是 `C:\Program Files\ScreenOCRReader.exe`**（他自己放的；要管理員權限才能覆蓋，所以由他自己複製取代）。每次出新版要提醒他換。
 - 使用者桌面 `C:\Users\s9040\OneDrive\桌面\ScreenOCRReader.exe` 是舊的 v1.0，使用者沒要求覆蓋。
+- 「上傳到兩端」＝ GitHub ＋ 專案資料夾（`使用說明.md`、`原始碼\` 要和 git 追蹤的檔案一致）。
 - 覆蓋 exe 前，先請使用者「完全關閉程式」（右下角圖示右鍵 →「✖ 完全關閉程式」），不要強制結束他的程式。
 
 ## 這是什麼
