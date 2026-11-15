@@ -1,0 +1,6 @@
+rapidocr==3.10.0
+onnxruntime>=1.18,<2
+mss>=9
+Pillow>=10
+numpy>=1.26,<3
+pywin32>=306; sys_platform == "win32"
