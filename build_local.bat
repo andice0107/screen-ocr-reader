@@ -16,6 +16,7 @@ pyinstaller --noconfirm --clean --onefile --windowed ^
   --collect-submodules rapidocr ^
   --hidden-import win32com.client ^
   --hidden-import pythoncom ^
+  --hidden-import gtts --collect-submodules gtts --hidden-import miniaudio --hidden-import _miniaudio --hidden-import _cffi_backend --hidden-import pystray._win32 ^
   --exclude-module torch --exclude-module paddle --exclude-module openvino --exclude-module tensorrt ^
   --add-binary "%WINDIR%\System32\msvcp140.dll;." ^
   --add-binary "%WINDIR%\System32\msvcp140_1.dll;." ^

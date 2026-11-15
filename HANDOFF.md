@@ -1,84 +1,82 @@
-# 交接說明：截圖朗讀小幫手（給本機端的 Claude）
+# 交接說明：截圖朗讀小幫手（給之後接手的 Claude）
 
-> 寫於 2026-11-15，由雲端專案「雜務專區」的 Claude 交接。使用者 andice 是國小老師，不寫程式、只會按按鍵，請用簡單的中文和他溝通，需要他做的事要給「一步一步、點哪裡」的說明。
+> 最後更新：2026-11-16，v1.5.0（使用者認定「幾乎是最終版」，已收工）。
+> 使用者 andice 是國小老師，不寫程式。請用簡單的中文、一步一步說明；**先等他說要改什麼再動工**。
 
-## 0. 第一步：把原始碼抓到本機
+## 現況與規則
 
-原始碼很小（不到 1 MB，慢的只有那個 120 MB 的 exe），請直接複製下來：
+- **GitHub 只放原始碼與記錄檔，不放軟體本體（exe）**。舊的 v1.0.x Releases 與雲端打包流程（GitHub Actions）已刪除，請不要再加回來。
+- 成品 exe 只放在使用者的專案資料夾：
+  `G:\我的雲端硬碟\claude\雜務專區\MSI Claw 8 AI+\生成電腦版軟體-截圖文字辨識報讀程式\`
+  （裡面有 `ScreenOCRReader.exe`、`使用說明.md`、`原始碼\` 備份）
+- 本機開發資料夾：`C:\dev\screen-ocr-reader`（含 `.venv`；不要在 G: 雲端硬碟裡打包，檔案太多同步很慢）
+- 使用者桌面 `C:\Users\s9040\OneDrive\桌面\ScreenOCRReader.exe` 是舊的 v1.0，使用者沒要求覆蓋。
+- 覆蓋 exe 前，先請使用者「完全關閉程式」（右下角圖示右鍵 →「✖ 完全關閉程式」），不要強制結束他的程式。
 
-```powershell
-git clone https://github.com/andice0107/screen-ocr-reader C:\dev\screen-ocr-reader
+## 這是什麼
+
+Windows 桌面小工具：框選螢幕任何地方 → 離線 OCR（繁中為主）→ 念出來，念到哪字亮到哪。功能細節見 `README.md`（給使用者看的說明）。
+
+## 檔案
+
+```
+src\screen_ocr_reader.py   ← 全部程式（約 2400 行，APP_VERSION 在檔頭）
+assets\icon.ico            ← 圖示（藍底白字「讀」）
+requirements.txt           ← Python 套件
+run_dev.bat                ← 不打包直接執行（測試用）
+build_local.bat            ← 本機打包（最後有 pause；Claude 可直接跑裡面的 pyinstaller 指令）
+README.md                  ← 使用說明（複製到專案資料夾時改名「使用說明.md」）
+HANDOFF.md                 ← 本文件
 ```
 
-沒有 git 的話，下載 ZIP 解壓縮也可以：https://github.com/andice0107/screen-ocr-reader/archive/refs/heads/main.zip
+## 打包與檢查
 
-建議放在本機磁碟（例如 `C:\dev\screen-ocr-reader`），**不要放在 H: 的 Google 雲端硬碟同步資料夾裡打包**，因為 `.venv`、`build`、`dist` 有上萬個檔案，同步會很慢。使用者的專案資料夾是 `H:\我的雲端硬碟\claude\雜務專區`，若要備份，可只把原始碼複製一份到 `H:\我的雲端硬碟\claude\雜務專區\截圖朗讀小幫手\`。
+1. Python 3.12（不要用 3.13+）。`.venv` 在 `C:\dev\screen-ocr-reader\.venv`。
+2. 跑 `build_local.bat` 的 pyinstaller 參數 → `dist\ScreenOCRReader.exe`（約 120 MB）。
+3. `dist\ScreenOCRReader.exe --selftest selftest.txt`，最後一行要是 `RESULT: PASS`（會測 OCR、多音字、截圖、語音、Google 語音下載解碼、系統匣、快捷鍵、tkinter）。
+4. 複製到專案資料夾，並同步 `使用說明.md` 與 `原始碼\`。
 
-下文所說的「這個資料夾」就是你 clone 下來的位置。
+## 技術重點（都驗證過，別輕易換）
 
-## 1. 這是什麼
+- **介面**：Python 3.12 + tkinter/ttk；`SetProcessDpiAwareness(2)`；單一執行個體（Mutex）。
+- **OCR**：`rapidocr==3.10.0`（PP-OCRv6，模型內含）+ onnxruntime。舊版 PP-OCRv4 繁體會漏字，不要退回。
+- **截圖**：mss 拍整個虛擬桌面，再用全螢幕 Toplevel 框選。
+- **內建語音**：pywin32 `SAPI.SpVoice`，含 OneCore 語音（Hanhan、Yating、Zhiwei）。跟讀標示靠輪詢 `Status.InputWordPosition/Length`（`SVSF_NOT_XML`）。SAPI 語速只在下一句生效，所以即時改語速是「從目前的字重新開始念」（250 ms 去抖動）。
+- **Google 國語（台灣）**：gTTS（`lang="zh-TW"`）取 mp3 → miniaudio 解碼成 24 kHz float32 → `miniaudio.PlaybackDevice` 用 generator 播放。
+  - **變速用 WSOLA**（N=960、HS=480、TOL=240），音高不變（以前用 MCI 調速會變「花栗鼠聲」，使用者不接受）。速度倍率 `2**(rate/10)`。
+  - 音量平滑漸變、可即時調整；跟讀標示依每段語音能量累積估算到字。
+  - 沒網路自動退回內建語音。
+- **多音字**：`PronBook`（`pronunciations.json`），用同音字替換。`prepare_speech()` 會產生要念的文字和對照回原文的索引表，供跟讀標示使用。
+- **全域快捷鍵**：`RegisterHotKey` 在自己的執行緒跑訊息迴圈，用 `PostThreadMessageW`（WM_APP 0x8001）+ queue 傳指令；`scan()` 試註冊來偵測已被占用的組合。
+  - 預設快捷鍵（Ctrl+Alt+…）：
 
-一個 Windows 桌面小工具：一個**永遠浮在螢幕最上層**的小視窗，框選螢幕上任何地方 → 離線 OCR 辨識文字（繁體中文為主，也支援簡中、英文）→ 用 Windows 內建語音念出來。使用者要邊看其他程式邊截圖朗讀。
+    | 鍵 | 功能 |
+    |---|---|
+    | R | 截圖 |
+    | E | 同一區 |
+    | S | 停止 |
+    | P | 暫停／播放 |
+    | ←／→ | 語速 |
+    | ↑／↓ | 文字大小 |
 
-使用者已試用 v1.0.2，回饋：「還滿適合我說的方向的」。目前沒有已知錯誤、沒有待辦的修改要求，下一步等使用者提出想調整的地方。
+  - Ctrl+Alt+空白鍵在使用者電腦被不明程式占用（不是 PowerToys），所以暫停用 P。
+- **模式**：`App.mode` = `"panel"`（完整面板）／`"mini"`（浮動圖案 `MiniIcon`）／`"tray"`（只剩系統匣，pystray win32）。面板 × 是收到系統匣，「完全關閉程式」才真的結束。
+- **透明度**：可到 1%。40% 以下顯示小紅點 `RedDot`：alpha 在 0.03～1 之間「一顯一透」呼吸（2.4 秒一輪），滑鼠移上去視窗暫時變清楚。
+- **每次啟動固定預設**：浮動圖案、透明度 100%、音量 100%、語速 0、Google 國語（台灣）。其餘設定（快捷鍵、文字大小、位置、多音字…）會記住。
+- 資料：`%APPDATA%\ScreenOCRReader\` 裡的 `settings.json`、`pronunciations.json`、`error.log`。
 
-## 2. 檔案在哪裡
+## 版本紀錄
 
-| 東西 | 位置 |
+| 版本 | 內容 |
 |---|---|
-| **原始碼** | 還不在使用者電腦上，請先取得（見下方「0. 第一步」） |
-| 使用者已下載的 exe | 檔名 `ScreenOCRReader.exe`（沒改名），放在**桌面**。使用者不確定是 OneDrive 的桌面（`%USERPROFILE%\OneDrive\桌面` 或 `...\OneDrive\Desktop`）還是一般桌面（`C:\Users\<使用者>\Desktop`），請自己找，例如 PowerShell：`Get-ChildItem $env:USERPROFILE -Recurse -Filter ScreenOCRReader.exe -ErrorAction SilentlyContinue -Depth 3` |
-| GitHub repo | https://github.com/andice0107/screen-ocr-reader （和這個資料夾內容相同，main 分支最新版） |
-| 使用者設定檔 | `%APPDATA%\ScreenOCRReader\settings.json`；當機記錄 `%APPDATA%\ScreenOCRReader\error.log` |
+| v1.0.x | 雲端初版：框選截圖、離線 OCR、SAPI 朗讀 |
+| v1.1 | 跟讀標示、Google 國語、可自訂快捷鍵（偵測占用）、浮動小圖案與右鍵選單、多音字唸法 |
+| v1.2 | 透明度到 1% + 呼吸小紅點、面板常駐快捷鍵說明、設定條移到文字框下方、文字大小、WSOLA 不變調變速、語速音量即時生效、右鍵功能全進面板 |
+| v1.3 | 小紅點改一顯一透、× 收到系統匣、「完全關閉程式」、啟動固定預設、語速快捷鍵 |
+| v1.4 | 點字就從那個字開始念、語速改 Ctrl+Alt+←→、文字大小 Ctrl+Alt+↑↓ |
+| v1.5 | 暫停／播放快捷鍵 Ctrl+Alt+P、快捷鍵可選空白鍵、系統匣選單加暫停／播放 |
 
-注意：桌面上的 exe 只是打包好的成品，**沒辦法拿來改**；要修改請改這個資料夾裡的 `src\screen_ocr_reader.py`，再重新打包。
+## 已知事項
 
-使用者**不想再從 GitHub 下載**（太慢），之後請在本機改、本機打包、直接把新 exe 給他（可以覆蓋桌面上那個，覆蓋前先確認程式已關閉）。GitHub 上的雲端打包流程保留著，但不需要用。
-
-## 3. 資料夾內容
-
-```
-截圖朗讀小幫手\
-├─ src\screen_ocr_reader.py   ← 全部程式都在這一個檔案（約 830 行）
-├─ assets\icon.ico           ← 圖示（藍底白字「讀」）
-├─ requirements.txt          ← Python 套件
-├─ run_dev.bat               ← 不打包、直接執行原始碼（改完測試最快）
-├─ build_local.bat           ← 本機打包成 dist\ScreenOCRReader.exe，並跑自我檢查
-├─ .github\workflows\build-windows.yml  ← 雲端打包（GitHub Actions，可不用）
-├─ README.md                 ← 給使用者的使用說明
-└─ HANDOFF.md                ← 本文件
-```
-
-## 4. 技術選型（已經驗證過，別輕易換）
-
-- **語言/介面**：Python 3.12 + tkinter（ttk）。
-- **截圖**：`mss`，先拍整個虛擬桌面（支援多螢幕），再用全螢幕半透明 Toplevel 讓使用者拖曳框選；框內顯示原亮度。程式啟動時呼叫 `SetProcessDpiAwareness(2)`，高 DPI 螢幕座標才不會偏。
-- **OCR**：`rapidocr==3.10.0`（PP-OCRv6 模型，**模型已內含在 wheel 裡，不用連網下載**）+ onnxruntime。實測繁體中文非常準（「國語課本第三課：龜兔賽跑，烏龜慢慢爬」「與眾不同」「鬱悶」全對）。
-  - 曾試過 `rapidocr_onnxruntime 1.4.4`（PP-OCRv4），繁體字會漏字（龜、眾），**不要退回舊版**。
-  - 沒用 Windows 內建 OCR（winrt），因為使用者電腦不一定裝了中文 OCR 語言套件。
-  - 小圖會自動放大 2 倍再辨識；辨識結果依座標排成行，中文字之間不加空格。
-- **朗讀**：pywin32 呼叫 `SAPI.SpVoice`（非同步 + PURGE 可隨時停止）。另外用 `SpObjectTokenCategory.SetId("HKLM\SOFTWARE\Microsoft\Speech_OneCore\Voices")` 把 Windows 10/11 的新版語音（Hanhan、Yating、Zhiwei）也列進選單。預設優先選中文（台灣）語音；若電腦沒有中文語音，狀態列會提示去「設定→時間與語言→語音」新增。
-  - 朗讀前把中文行與行之間的換行接起來，避免一行一行斷著念。
-- **全域快捷鍵**：ctypes `RegisterHotKey`（背景執行緒跑訊息迴圈）。`Ctrl+Alt+R` 框選截圖、`Ctrl+Alt+E` 同一區重截。被占用時狀態列會提示。
-- **其他**：單一執行個體（Mutex）；設定自動存 `%APPDATA%\ScreenOCRReader\settings.json`（語音、語速、音量、透明度、自動朗讀、顯示文字、視窗位置）；OCR 在背景執行緒，結果用 queue + `after()` 回到主執行緒。
-
-## 5. 介面
-
-小視窗按鈕：`📷 框選截圖`、`↻ 同一區`（重截上次範圍，翻頁用）、`🔊 朗讀`（文字框有反白就只念反白那段）、`⏹ 停止`、`⚙`（展開選項：語音、語速、音量、透明度、截圖後自動朗讀、顯示辨識文字）。下方是可編輯的文字框和狀態列。
-
-## 6. 怎麼在本機改與打包
-
-1. 電腦需要 **Python 3.12**（https://www.python.org/downloads/ ，安裝時勾「Add python.exe to PATH」）。先用 `py -3.12 --version` 檢查；沒有就請使用者安裝或你用 winget：`winget install Python.Python.3.12`。
-   - 不要用 3.13 以上，部分套件（onnxruntime 等）相容性較不保險；目前已驗證的是 3.12。
-2. **改完程式快速測試**：雙擊 `run_dev.bat`（第一次會建 `.venv` 並安裝套件，約幾分鐘；之後秒開）。
-3. **打包成 exe**：雙擊 `build_local.bat` → 產出 `dist\ScreenOCRReader.exe`（約 120 MB），並自動跑 `--selftest`，`selftest.txt` 最後一行應是 `RESULT: PASS`。
-4. 把新的 exe 複製到使用者桌面（覆蓋舊的前先關掉程式）。
-
-自我檢查指令：`ScreenOCRReader.exe --selftest 結果.txt`（會測 OCR、截圖、語音清單、tkinter）。
-
-## 7. 已知事項 / 可能的下一步
-
-- exe 沒有數位簽章，第一次開啟 Windows 會跳「已保護您的電腦」→「其他資訊」→「仍要執行」。
-- onefile 啟動要先解壓，第一次開會等幾秒。若使用者嫌慢，可改用 `--onedir`（資料夾版，啟動較快）。
-- 使用者曾問過 **Mac 版**：可做（.app 免安裝，但第一次要右鍵「打開」並允許「螢幕錄製」權限），已約定「先用 Windows 版，之後再說」。Mac 版需改：截圖權限、快捷鍵（不能用 RegisterHotKey）、語音改用 macOS `say` / NSSpeechSynthesizer。
-- 可能的加強方向（使用者尚未要求）：線上自然語音（edge-tts）、朗讀時逐句標示、念完自動截下一頁。
+- exe 沒有數位簽章，第一次開啟要按「其他資訊」→「仍要執行」。onefile 啟動要等幾秒。
+- 使用者問過 Mac 版，約定之後再說（需改截圖權限、快捷鍵、語音）。
