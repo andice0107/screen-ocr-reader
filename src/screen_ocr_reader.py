@@ -240,6 +240,16 @@ class Speaker:
 
         return sorted(self.tokens, key=lambda n: (rank(n), n))
 
+    def has_chinese_voice(self):
+        for token in self.tokens.values():
+            try:
+                langs = token.GetAttribute("Language").lower().split(";")
+            except Exception:
+                continue
+            if any(l in ("404", "804", "c04", "1004", "1404") for l in langs):
+                return True
+        return False
+
     def default_voice(self):
         names = self.voice_names()
         for prefer in ("Yating", "Hanhan", "Zhiwei", "HsiaoChen", "雅婷", "涵涵", "志偉"):
@@ -567,6 +577,9 @@ class App:
             msg = "快捷鍵被其他程式占用，請用按鈕操作"
         if self.speaker.error:
             msg = "找不到語音引擎：" + self.speaker.error
+        elif not self.speaker.has_chinese_voice():
+            msg = "電腦沒有中文語音：請到 設定→時間與語言→語音 新增「中文(台灣)」"
+
         self.set_status(msg)
 
         # 背景先載入 OCR 模型，第一次截圖會比較快
