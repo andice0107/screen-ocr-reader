@@ -1,6 +1,6 @@
 # 交接說明：截圖朗讀小幫手（給之後接手的 Claude）
 
-> 最後更新：2026-11-16，v1.5.0（使用者認定「幾乎是最終版」，已收工）。
+> 最後更新：2026-11-16，v1.6.0。
 > 使用者 andice 是國小老師，不寫程式。請用簡單的中文、一步一步說明；**先等他說要改什麼再動工**。
 
 ## 現況與規則
@@ -41,6 +41,7 @@ HANDOFF.md                 ← 本文件
 - **介面**：Python 3.12 + tkinter/ttk；`SetProcessDpiAwareness(2)`；單一執行個體（Mutex）。
 - **OCR**：`rapidocr==3.10.0`（PP-OCRv6，模型內含）+ onnxruntime。舊版 PP-OCRv4 繁體會漏字，不要退回。
 - **截圖**：mss 拍整個虛擬桌面，再用全螢幕 Toplevel 框選。
+- **文字方向**：`OcrEngine.recognize()` 回傳 `(top, left, height, text, width)`，排序在 `to_text(items, vertical)`：橫式依行；直式依欄（框中心 x 落在同一欄就合併），欄由右到左、欄內由上到下。RapidOCR 會自動把直長框轉 90° 辨識，直書辨識率實測良好。`App.last_items` 記住上次結果，切換方向時若文字框沒被改過就直接重排。設定 `read_dir`（h/v）。
 - **內建語音**：pywin32 `SAPI.SpVoice`，含 OneCore 語音（Hanhan、Yating、Zhiwei）。跟讀標示靠輪詢 `Status.InputWordPosition/Length`（`SVSF_NOT_XML`）。SAPI 語速只在下一句生效，所以即時改語速是「從目前的字重新開始念」（250 ms 去抖動）。
 - **Google 國語（台灣）**：gTTS（`lang="zh-TW"`）取 mp3 → miniaudio 解碼成 24 kHz float32 → `miniaudio.PlaybackDevice` 用 generator 播放。
   - **變速用 WSOLA**（N=960、HS=480、TOL=240），音高不變（以前用 MCI 調速會變「花栗鼠聲」，使用者不接受）。速度倍率 `2**(rate/10)`。
@@ -75,6 +76,7 @@ HANDOFF.md                 ← 本文件
 | v1.3 | 小紅點改一顯一透、× 收到系統匣、「完全關閉程式」、啟動固定預設、語速快捷鍵 |
 | v1.4 | 點字就從那個字開始念、語速改 Ctrl+Alt+←→、文字大小 Ctrl+Alt+↑↓ |
 | v1.5 | 暫停／播放快捷鍵 Ctrl+Alt+P、快捷鍵可選空白鍵、系統匣選單加暫停／播放 |
+| v1.6 | 文字方向可選橫式／直式（直式：上→下、右→左），面板、浮動圖案右鍵、系統匣都能切換 |
 
 ## 已知事項
 

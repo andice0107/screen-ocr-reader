@@ -24,7 +24,7 @@ import time
 import traceback
 
 APP_NAME = "截圖朗讀小幫手"
-APP_VERSION = "1.5.0"
+APP_VERSION = "1.6.0"
 
 IS_WINDOWS = sys.platform == "win32"
 UI_FONT = "Microsoft JhengHei UI"
@@ -113,6 +113,7 @@ DEFAULT_SETTINGS = {
     "auto_read": True,
     "show_text": True,
     "follow": True,
+    "read_dir": "h",
     "alpha": 1.0,
     "x": None,
     "y": None,
@@ -237,7 +238,7 @@ class OcrEngine:
         return self._engine
 
     def recognize(self, pil_image):
-        """回傳 [(top, left, height, text), ...]（已依閱讀順序排列）。"""
+        """回傳 [(top, left, height, text, width), ...]（還沒排順序，排序交給 to_text）。"""
         import numpy as np
         from PIL import Image
 
@@ -263,17 +264,41 @@ class OcrEngine:
                 continue
             ys = [p[1] for p in box]
             xs = [p[0] for p in box]
-            items.append((min(ys), min(xs), max(ys) - min(ys), text))
+            items.append((min(ys), min(xs), max(ys) - min(ys), text, max(xs) - min(xs)))
         return items
 
     @staticmethod
-    def to_text(items):
-        """把辨識出的文字框依「行」整理成文字。"""
+    def _join(parts):
+        joined = ""
+        for p in parts:
+            if joined and not (re.search(f"[{_CJK}]$", joined) or re.match(f"^[{_CJK}]", p)):
+                joined += " "
+            joined += p
+        return joined
+
+    @staticmethod
+    def to_text(items, vertical=False):
+        """把辨識出的文字框整理成文字。
+        橫式：一行一行由上到下、每行由左到右。
+        直式：一欄一欄由右到左、每欄由上到下。"""
         if not items:
             return ""
+        if vertical:
+            items = sorted(items, key=lambda t: -(t[1] + t[4]))  # 右邊的先
+            cols = []
+            for top, left, height, text, width in items:
+                cx = left + width / 2
+                for c in cols:
+                    if c["l"] <= cx <= c["r"]:
+                        c["parts"].append((top, text))
+                        break
+                else:
+                    cols.append({"l": left, "r": left + width, "parts": [(top, text)]})
+            cols.sort(key=lambda c: -c["r"])
+            return "\n".join(OcrEngine._join([t for _, t in sorted(c["parts"])]) for c in cols)
         items = sorted(items, key=lambda t: (t[0], t[1]))
         lines = []
-        for top, left, height, text in items:
+        for top, left, height, text, *_ in items:
             if lines:
                 last = lines[-1]
                 mid = top + height / 2
@@ -281,16 +306,7 @@ class OcrEngine:
                     last["parts"].append((left, text))
                     continue
             lines.append({"top": top, "height": height, "parts": [(left, text)]})
-        out = []
-        for line in lines:
-            parts = [t for _, t in sorted(line["parts"])]
-            joined = ""
-            for p in parts:
-                if joined and not (re.search(f"[{_CJK}]$", joined) or re.match(f"^[{_CJK}]", p)):
-                    joined += " "
-                joined += p
-            out.append(joined)
-        return "\n".join(out)
+        return "\n".join(OcrEngine._join([t for _, t in sorted(line["parts"])]) for line in lines)
 
 
 def prepare_speech(text, rules=()):
@@ -1454,6 +1470,11 @@ class TrayIcon:
                 pystray.MenuItem("文字放大", post("font_up")),
                 pystray.MenuItem("文字縮小", post("font_down")),
                 pystray.Menu.SEPARATOR,
+                pystray.MenuItem("橫式閱讀（左→右）", post("dir_h"), radio=True,
+                                 checked=lambda item: getattr(app, "read_dir", "h") != "v"),
+                pystray.MenuItem("直式閱讀（上→下、右→左）", post("dir_v"), radio=True,
+                                 checked=lambda item: getattr(app, "read_dir", "h") == "v"),
+                pystray.Menu.SEPARATOR,
                 pystray.MenuItem("✖ 完全關閉程式", post("quit")),
             )
             self.icon = pystray.Icon("ScreenOCRReader", img, APP_NAME, menu)
@@ -1557,6 +1578,7 @@ class App:
         self.events = queue.Queue()
         self.last_rect = None
         self.busy = False
+        self.last_items = None
         self.mode = "tray"       # "panel" 完整面板、"mini" 浮動小圖案、"tray" 只剩右下角圖示
         self._tray_tip_shown = False
 
@@ -1646,6 +1668,15 @@ class App:
         r += 1
         self.font_var = tk.IntVar(value=int(self.settings.get("font_size", 12)))
         self.font_label = slider(r, "文字大小", self.font_var, 9, 36, 1, self.apply_font)
+        r += 1
+        ttk.Label(opt, text="文字方向").grid(row=r, column=0, sticky="w")
+        dirs = ttk.Frame(opt)
+        dirs.grid(row=r, column=1, columnspan=2, sticky="w", padx=4)
+        self.dir_var = tk.StringVar(value="v" if self.settings.get("read_dir") == "v" else "h")
+        self.read_dir = self.dir_var.get()
+        for label, v in (("橫式（左→右、上→下）", "h"), ("直式（上→下、右→左）", "v")):
+            ttk.Radiobutton(dirs, text=label, value=v, variable=self.dir_var,
+                            command=self._on_dir_change).pack(side="left", padx=(0, 10))
         r += 1
         ttk.Label(opt, text="小圖案").grid(row=r, column=0, sticky="w")
         sizes = ttk.Frame(opt)
@@ -1889,6 +1920,7 @@ class App:
                     {"panel": self.leave_mini, "mini": self.enter_mini, "capture": self.start_capture,
                      "repeat": self.repeat_capture, "stop": self.stop_speech, "quit": self.quit,
                      "pause": self.play_pause,
+                     "dir_h": lambda: self._set_dir("h"), "dir_v": lambda: self._set_dir("v"),
                      "faster": lambda: self._nudge_rate(1, show=True),
                      "slower": lambda: self._nudge_rate(-1, show=True),
                      "font_up": lambda: self._nudge_font(1, show=True),
@@ -1990,6 +2022,11 @@ class App:
         for label, v in (("小", 48), ("中", 64), ("大", 84)):
             sm.add_radiobutton(label=label, variable=self.size_var, value=v, command=self._resize_mini)
         m.add_cascade(label="⚪ 圖案大小", menu=sm)
+
+        dm = tk.Menu(m, tearoff=0, font=f)
+        dm.add_radiobutton(label="橫式（左→右、上→下）", variable=self.dir_var, value="h", command=self._on_dir_change)
+        dm.add_radiobutton(label="直式（上→下、右→左）", variable=self.dir_var, value="v", command=self._on_dir_change)
+        m.add_cascade(label="📐 文字方向（目前 " + ("直式" if self.dir_var.get() == "v" else "橫式") + "）", menu=dm)
 
         m.add_checkbutton(label="截圖後自動朗讀", variable=self.auto_var)
         m.add_checkbutton(label="跟讀標示", variable=self.follow_var, command=self._clear_highlight)
@@ -2150,15 +2187,41 @@ class App:
         def work():
             try:
                 t = time.time()
-                text = OcrEngine.to_text(self.ocr.recognize(img))
-                self.events.put(("ocr_done", (text, time.time() - t)))
+                items = self.ocr.recognize(img)
+                self.events.put(("ocr_done", (items, time.time() - t)))
             except Exception as e:
                 self.events.put(("error", f"辨識失敗：{e}"))
 
         threading.Thread(target=work, daemon=True).start()
 
+    def _set_dir(self, v):
+        self.dir_var.set(v)
+        self._on_dir_change()
+
+    def _on_dir_change(self):
+        """改文字方向：如果文字框是剛辨識出來、沒被改過的，就馬上用新方向重排。"""
+        v = self.dir_var.get()
+        if v == self.read_dir:
+            return
+        old_text = OcrEngine.to_text(self.last_items, self.read_dir == "v") if self.last_items else None
+        self.read_dir = v
+        msg = "文字方向：" + ("直式（上→下、右→左）" if v == "v" else "橫式（左→右、上→下）")
+        if old_text is not None and self.text.get("1.0", "end-1c") == old_text:
+            was_speaking = self.cur is not None
+            self.stop_speech()
+            self.text.delete("1.0", "end")
+            self.text.insert("1.0", OcrEngine.to_text(self.last_items, v == "v"))
+            msg += "，已重新排列"
+            if was_speaking:
+                self.read_text()
+        self.set_status(msg)
+        if self.mode == "mini":
+            self.mini.toast(msg, ms=1200)
+
     def _ocr_done(self, payload):
-        text, secs = payload
+        items, secs = payload
+        self.last_items = items
+        text = OcrEngine.to_text(items, self.dir_var.get() == "v")
         self.busy = False
         self.mini.set_state("idle")
         self.text.delete("1.0", "end")
@@ -2386,6 +2449,7 @@ class App:
             show_text=self.show_var.get(),
             show_options=bool(self.options.winfo_ismapped()) if not self.mini_mode else self.settings.get("show_options", True),
             follow=self.follow_var.get(),
+            read_dir=self.dir_var.get(),
             click_read=self.clickread_var.get(),
             alpha=float(self.alpha_var.get()),
             font_size=int(self.font_var.get()),
@@ -2444,6 +2508,19 @@ def selftest(out_path):
     except Exception:
         ok = False
         lines.append("OCR ERROR:\n" + traceback.format_exc())
+
+    try:
+        # 三欄直書（由右到左），中間那欄被切成上下兩段
+        fake = [(10, 100, 80, "一二三", 20), (10, 60, 40, "四五", 20), (60, 60, 40, "六", 20), (10, 20, 80, "七八", 20)]
+        vt = OcrEngine.to_text(fake, vertical=True)
+        ht = OcrEngine.to_text(fake)
+        lines.append(f"Vertical order: {vt!r}  horizontal: {ht!r}")
+        if vt != "一二三\n四五六\n七八":
+            ok = False
+            lines.append("FAIL: vertical order")
+    except Exception:
+        ok = False
+        lines.append("VERT ERROR:\n" + traceback.format_exc())
 
     try:
         spoken, m = prepare_speech("我去銀行\n排行列。\n\nEnd", [("銀行", "銀杭")])
