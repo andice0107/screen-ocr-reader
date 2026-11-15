@@ -14,7 +14,7 @@
 |---|---|
 | **原始碼（這個資料夾）** | `H:\我的雲端硬碟\claude\雜務專區\截圖朗讀小幫手\`（Google 雲端硬碟同步資料夾） |
 | 使用者已下載的 exe | 檔名 `ScreenOCRReader.exe`（沒改名），放在**桌面**。使用者不確定是 OneDrive 的桌面（`%USERPROFILE%\OneDrive\桌面` 或 `...\OneDrive\Desktop`）還是一般桌面（`C:\Users\<使用者>\Desktop`），請自己找，例如 PowerShell：`Get-ChildItem $env:USERPROFILE -Recurse -Filter ScreenOCRReader.exe -ErrorAction SilentlyContinue -Depth 3` |
-| GitHub repo | https://github.com/andice0107/screen-ocr-reader （和這個資料夾內容相同，commit `dce5221`） |
+| GitHub repo | https://github.com/andice0107/screen-ocr-reader （和這個資料夾內容相同，main 分支最新版） |
 | 使用者設定檔 | `%APPDATA%\ScreenOCRReader\settings.json`；當機記錄 `%APPDATA%\ScreenOCRReader\error.log` |
 
 注意：桌面上的 exe 只是打包好的成品，**沒辦法拿來改**；要修改請改這個資料夾裡的 `src\screen_ocr_reader.py`，再重新打包。
