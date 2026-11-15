@@ -24,7 +24,7 @@ import time
 import traceback
 
 APP_NAME = "截圖朗讀小幫手"
-APP_VERSION = "1.6.0"
+APP_VERSION = "1.6.1"
 
 IS_WINDOWS = sys.platform == "win32"
 UI_FONT = "Microsoft JhengHei UI"
@@ -1697,7 +1697,7 @@ class App:
         ttk.Checkbutton(checks, text="顯示文字框", variable=self.show_var,
                         command=self.toggle_text).pack(side="left", padx=(12, 0))
         self.clickread_var = tk.BooleanVar(value=bool(self.settings.get("click_read", True)))
-        ttk.Checkbutton(checks, text="點字就從那裡開始念", variable=self.clickread_var).pack(side="left", padx=(12, 0))
+        ttk.Checkbutton(checks, text="Ctrl＋點字就從那裡開始念", variable=self.clickread_var).pack(side="left", padx=(12, 0))
         r += 1
         tools = ttk.Frame(opt)
         tools.grid(row=r, column=0, columnspan=3, sticky="w", pady=(6, 2))
@@ -1780,7 +1780,7 @@ class App:
             f"{hotkey_text(hk.get(HK_PAUSE))} 暫停／播放　{hotkey_text(hk.get(HK_STOP))} 停止朗讀\n"
             f"　　　　　{hotkey_text(hk.get(HK_FASTER))} 語速加快　{hotkey_text(hk.get(HK_SLOWER))} 語速放慢　"
             f"{hotkey_text(hk.get(HK_FONT_UP))} 文字放大　{hotkey_text(hk.get(HK_FONT_DOWN))} 文字縮小\n"
-            f"小技巧：點文字框裡的某個字，就從那個字開始念；反白一段再按「朗讀」只念那一段；"
+            f"小技巧：按住 Ctrl 點文字框裡的某個字，就從那個字開始念（一般點一下可以直接改字）；反白一段再按「朗讀」只念那一段；"
             f"文字上按右鍵可設定唸法。　版本 {APP_VERSION}"))
 
     def set_status(self, msg):
@@ -2030,7 +2030,7 @@ class App:
 
         m.add_checkbutton(label="截圖後自動朗讀", variable=self.auto_var)
         m.add_checkbutton(label="跟讀標示", variable=self.follow_var, command=self._clear_highlight)
-        m.add_checkbutton(label="點字就從那裡開始念", variable=self.clickread_var)
+        m.add_checkbutton(label="Ctrl＋點字就從那裡開始念", variable=self.clickread_var)
         m.add_separator()
         m.add_command(label="📋 複製辨識出的文字", command=self.copy_text)
         m.add_command(label="📖 多音字唸法設定…", command=self.open_pron)
@@ -2254,12 +2254,15 @@ class App:
         self._press_at = (e.x, e.y, e.state)
 
     def _text_release(self, e):
-        """在文字框點一下某個字（不是拖曳反白），就從那個字開始往後念。"""
+        """按住 Ctrl 在文字框點一下某個字，就從那個字開始往後念。
+        （一般點一下只是放游標，方便編輯文字。）"""
         p, self._press_at = self._press_at, None
         if not p or not self.clickread_var.get():
             return
         x0, y0, state = p
-        if abs(e.x - x0) > 4 or abs(e.y - y0) > 4 or state & 0x5:  # 拖曳、或按著 Shift/Ctrl
+        if abs(e.x - x0) > 4 or abs(e.y - y0) > 4:  # 拖曳反白
+            return
+        if not (state & 0x4) or state & 0x1:  # 要按著 Ctrl、沒按 Shift
             return
         idx = self.text.index(f"@{e.x},{e.y}")
         box = self.text.bbox(idx)
@@ -2268,8 +2271,7 @@ class App:
         self.root.after(30, lambda: self._read_from_click(idx))
 
     def _read_from_click(self, idx):
-        if self.text.tag_ranges("sel"):
-            return  # 連點兩下反白了語詞，就不打斷
+        self.text.tag_remove("sel", "1.0", "end")
         self.read_text(start=idx)
 
     def read_text(self, start=None):
