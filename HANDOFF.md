@@ -2,6 +2,20 @@
 
 > 寫於 2026-11-15，由雲端專案「雜務專區」的 Claude 交接。使用者 andice 是國小老師，不寫程式、只會按按鍵，請用簡單的中文和他溝通，需要他做的事要給「一步一步、點哪裡」的說明。
 
+## 0. 第一步：把原始碼抓到本機
+
+原始碼很小（不到 1 MB，慢的只有那個 120 MB 的 exe），請直接複製下來：
+
+```powershell
+git clone https://github.com/andice0107/screen-ocr-reader C:\dev\screen-ocr-reader
+```
+
+沒有 git 的話，下載 ZIP 解壓縮也可以：https://github.com/andice0107/screen-ocr-reader/archive/refs/heads/main.zip
+
+建議放在本機磁碟（例如 `C:\dev\screen-ocr-reader`），**不要放在 H: 的 Google 雲端硬碟同步資料夾裡打包**，因為 `.venv`、`build`、`dist` 有上萬個檔案，同步會很慢。使用者的專案資料夾是 `H:\我的雲端硬碟\claude\雜務專區`，若要備份，可只把原始碼複製一份到 `H:\我的雲端硬碟\claude\雜務專區\截圖朗讀小幫手\`。
+
+下文所說的「這個資料夾」就是你 clone 下來的位置。
+
 ## 1. 這是什麼
 
 一個 Windows 桌面小工具：一個**永遠浮在螢幕最上層**的小視窗，框選螢幕上任何地方 → 離線 OCR 辨識文字（繁體中文為主，也支援簡中、英文）→ 用 Windows 內建語音念出來。使用者要邊看其他程式邊截圖朗讀。
@@ -12,7 +26,7 @@
 
 | 東西 | 位置 |
 |---|---|
-| **原始碼（這個資料夾）** | `H:\我的雲端硬碟\claude\雜務專區\截圖朗讀小幫手\`（Google 雲端硬碟同步資料夾） |
+| **原始碼** | 還不在使用者電腦上，請先取得（見下方「0. 第一步」） |
 | 使用者已下載的 exe | 檔名 `ScreenOCRReader.exe`（沒改名），放在**桌面**。使用者不確定是 OneDrive 的桌面（`%USERPROFILE%\OneDrive\桌面` 或 `...\OneDrive\Desktop`）還是一般桌面（`C:\Users\<使用者>\Desktop`），請自己找，例如 PowerShell：`Get-ChildItem $env:USERPROFILE -Recurse -Filter ScreenOCRReader.exe -ErrorAction SilentlyContinue -Depth 3` |
 | GitHub repo | https://github.com/andice0107/screen-ocr-reader （和這個資料夾內容相同，main 分支最新版） |
 | 使用者設定檔 | `%APPDATA%\ScreenOCRReader\settings.json`；當機記錄 `%APPDATA%\ScreenOCRReader\error.log` |
@@ -58,7 +72,6 @@
    - 不要用 3.13 以上，部分套件（onnxruntime 等）相容性較不保險；目前已驗證的是 3.12。
 2. **改完程式快速測試**：雙擊 `run_dev.bat`（第一次會建 `.venv` 並安裝套件，約幾分鐘；之後秒開）。
 3. **打包成 exe**：雙擊 `build_local.bat` → 產出 `dist\ScreenOCRReader.exe`（約 120 MB），並自動跑 `--selftest`，`selftest.txt` 最後一行應是 `RESULT: PASS`。
-   - 建議把 `.venv`、`build`、`dist` 放在本機磁碟而不是 Google 雲端硬碟（H:）同步資料夾內，否則同步會很慢；必要時把整個資料夾複製到 `C:\dev\screen-ocr-reader` 再打包。
 4. 把新的 exe 複製到使用者桌面（覆蓋舊的前先關掉程式）。
 
 自我檢查指令：`ScreenOCRReader.exe --selftest 結果.txt`（會測 OCR、截圖、語音清單、tkinter）。
