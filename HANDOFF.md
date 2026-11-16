@@ -85,3 +85,11 @@ HANDOFF.md                 ← 本文件
 
 - exe 沒有數位簽章，第一次開啟要按「其他資訊」→「仍要執行」。onefile 啟動要等幾秒。
 - 使用者問過 Mac 版，約定之後再說（需改截圖權限、快捷鍵、語音）。
+
+## Mac 版（分支 mac-port，2026-11-17）
+
+- 同一份 `src/screen_ocr_reader.py` 用 `IS_MAC` 分流；Windows 部分沒刪，但**這次改動還沒在 Windows 上重新測過**（合併到 main 前請先在 Windows 跑 `--selftest`）。
+- Mac 專用：`MacSpeaker`（NSSpeechSynthesizer）、`MacGlobalHotkeys`（Carbon）、`MacTrayIcon`（NSStatusItem）、`make_borderless`／`mac_float`。`grab_virtual_screen()` 現在回傳 4 個值（多了 Retina 縮放比）。
+- 打包：`build_mac.sh`（需要 `brew install python@3.12 python-tk@3.12`）；套件清單 `requirements-mac.txt`；使用說明 `README-Mac.md`。
+- 規則不變：GitHub 只放原始碼與記錄，不放 `.app`。
+- 尚未實測：全域快捷鍵實際按下、⌘／Ctrl＋點字、選單列圖示左右鍵、滑鼠拖曳框選。

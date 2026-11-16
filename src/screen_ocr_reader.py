@@ -27,7 +27,11 @@ APP_NAME = "截圖朗讀小幫手"
 APP_VERSION = "1.6.1"
 
 IS_WINDOWS = sys.platform == "win32"
-UI_FONT = "Microsoft JhengHei UI"
+IS_MAC = sys.platform == "darwin"
+UI_FONT = "PingFang TC" if IS_MAC else "Microsoft JhengHei UI"
+CLICK_READ_LABEL = "⌘ 或 Ctrl＋點字就從那裡開始念" if IS_MAC else "Ctrl＋點字就從那裡開始念"
+# Tk 在 Mac 上：右鍵是 Button-2（有的版本是 3），兩個都接
+RIGHT_BUTTONS = (2, 3) if IS_MAC else (3,)
 
 GOOGLE_VOICE = "Google 國語（台灣）〔需要網路〕"
 
@@ -50,7 +54,10 @@ def set_dpi_aware():
 
 
 def data_dir():
-    base = os.environ.get("APPDATA") or os.path.expanduser("~")
+    if IS_MAC:
+        base = os.path.expanduser("~/Library/Application Support")
+    else:
+        base = os.environ.get("APPDATA") or os.path.expanduser("~")
     folder = os.path.join(base, "ScreenOCRReader")
     os.makedirs(folder, exist_ok=True)
     return folder
@@ -97,11 +104,11 @@ def hotkey_text(combo):
     if mods & MOD_CONTROL:
         parts.append("Ctrl")
     if mods & MOD_ALT:
-        parts.append("Alt")
+        parts.append("Option" if IS_MAC else "Alt")
     if mods & MOD_SHIFT:
         parts.append("Shift")
     if mods & MOD_WIN:
-        parts.append("Win")
+        parts.append("Cmd" if IS_MAC else "Win")
     parts.append(VK_NAME.get(vk, f"#{vk}"))
     return "+".join(parts)
 
@@ -529,6 +536,162 @@ class SapiSpeaker:
 
 
 # ---------------------------------------------------------------------------
+# 語音 1（Mac 版）：macOS 內建語音（NSSpeechSynthesizer），會回報念到哪個字
+# ---------------------------------------------------------------------------
+
+_MAC_DELEGATE = None
+
+
+def _mac_delegate_class():
+    """建立（只建一次）接收「念到哪個字」的 Objective-C 物件。"""
+    global _MAC_DELEGATE
+    if _MAC_DELEGATE is None:
+        from Foundation import NSObject
+        import objc
+
+        class SpeechDelegate(NSObject):
+            def initWithOwner_gen_(self, owner, gen):
+                self = objc.super(type(self), self).init()
+                if self is None:
+                    return None
+                self.owner, self.gen = owner, gen
+                return self
+
+            def speechSynthesizer_willSpeakWord_ofString_(self, sender, rng, string):
+                o = self.owner
+                if o is not None and self.gen == o.gen:
+                    o.pos, o.length = int(rng.location), int(rng.length)
+
+            def speechSynthesizer_didFinishSpeaking_(self, sender, ok):
+                o = self.owner
+                if o is not None and self.gen == o.gen:
+                    o.finished = True
+
+        _MAC_DELEGATE = SpeechDelegate
+    return _MAC_DELEGATE
+
+
+class MacSpeaker:
+    BASE_WPM = 175.0   # NSSpeechSynthesizer 的標準語速
+
+    def __init__(self):
+        self.tokens = {}   # 顯示名稱 -> 語音代號
+        self.locale = {}   # 顯示名稱 -> 語言（zh_TW…）
+        self.error = None
+        self.active = False
+        self.paused = False
+        self.gen = 0
+        self.pos = self.length = 0
+        self.finished = False
+        self.synth = None
+        self.delegate = None
+        self.voice = self   # 讓 App 取用 voice.Rate / voice.Volume 時不出錯
+        self.Rate = 0
+        self.Volume = 100
+        try:
+            from AppKit import NSSpeechSynthesizer
+
+            self._NS = NSSpeechSynthesizer
+            for ident in NSSpeechSynthesizer.availableVoices():
+                a = NSSpeechSynthesizer.attributesForVoice_(ident)
+                loc = str(a.get("VoiceLocaleIdentifier", ""))
+                # 中文語音全部列出；英文只列正常的語音（不列 Bad News、Zarvox 這類趣味語音）
+                if not (loc.startswith("zh") or (loc.startswith("en") and str(ident).startswith("com.apple.voice"))):
+                    continue
+                name = str(a.get("VoiceName", ident))
+                if name not in self.tokens:
+                    self.tokens[name] = str(ident)
+                    self.locale[name] = loc
+        except Exception as e:  # pragma: no cover
+            self.error = str(e)
+
+    def voice_names(self):
+        def rank(n):
+            loc = self.locale[n]
+            if loc == "zh_TW":
+                return 0
+            if loc.startswith("zh"):
+                return 1
+            return 2
+
+        def pref(n):
+            tid = self.tokens[n].lower()
+            return 0 if ("meijia" in tid or "sinji" in tid) else 1
+
+        return sorted(self.tokens, key=lambda n: (rank(n), pref(n), n))
+
+    def has_chinese_voice(self):
+        return any(l.startswith("zh") for l in self.locale.values())
+
+    def default_voice(self):
+        names = self.voice_names()
+        for prefer in ("meijia", "美佳", "sinji", "善怡"):
+            for n in names:
+                if prefer in n.lower() or prefer in self.tokens[n].lower():
+                    return n
+        return names[0] if names else ""
+
+    def speak(self, text, voice_name="", rate=0, volume=100):
+        if self.error or not self.tokens:
+            raise RuntimeError(self.error or "找不到語音引擎")
+        self.stop()
+        ident = self.tokens.get(voice_name) or self.tokens.get(self.default_voice())
+        self.gen += 1
+        self.pos = self.length = 0
+        self.finished = False
+        self.paused = False
+        self.Rate, self.Volume = rate, volume
+        synth = self._NS.alloc().initWithVoice_(ident)
+        self.delegate = _mac_delegate_class().alloc().initWithOwner_gen_(self, self.gen)
+        synth.setDelegate_(self.delegate)
+        synth.setRate_(self.BASE_WPM * 2.0 ** (max(-10, min(10, int(rate))) / 10.0))
+        synth.setVolume_(max(0, min(100, int(volume))) / 100.0)
+        self.synth = synth
+        self.active = True
+        synth.startSpeakingString_(text)
+
+    def stop(self):
+        self.active = False
+        self.paused = False
+        self.gen += 1
+        if self.synth is not None:
+            try:
+                self.synth.setDelegate_(None)
+                self.synth.stopSpeaking()
+            except Exception:
+                pass
+            self.synth = None
+
+    def pause(self):
+        if self.active and not self.paused and self.synth is not None:
+            self.synth.pauseSpeakingAtBoundary_(0)
+            self.paused = True
+
+    def resume(self):
+        if self.paused and self.synth is not None:
+            self.synth.continueSpeaking()
+        self.paused = False
+
+    def set_live(self, rate, volume):
+        """朗讀中改音量馬上生效；語速由 App 用「從目前的字重新念」處理。"""
+        self.Rate, self.Volume = rate, volume
+        if self.synth is not None:
+            try:
+                self.synth.setVolume_(max(0, min(100, int(volume))) / 100.0)
+            except Exception:
+                pass
+
+    def poll(self):
+        """回傳 (狀態, 念到第幾個字, 長度, 錯誤訊息)。"""
+        if not self.active or self.synth is None:
+            return ("done", 0, 0, None)
+        if self.finished and not self.paused:
+            self.active = False
+            return ("done", 0, 0, None)
+        return ("paused" if self.paused else "speaking", self.pos, self.length, None)
+
+
+# ---------------------------------------------------------------------------
 # 語音 2：Google 國語（台灣）——線上語音
 # ---------------------------------------------------------------------------
 
@@ -799,7 +962,7 @@ class GoogleSpeaker:
 # 全域快捷鍵（不管目前在哪個程式都有效），可隨時重設、可檢查某組按鍵是否已被占用
 # ---------------------------------------------------------------------------
 
-class GlobalHotkeys(threading.Thread):
+class WinGlobalHotkeys(threading.Thread):
     MOD_NOREPEAT = 0x4000
     WM_HOTKEY = 0x0312
     WM_APP_CMD = 0x8001
@@ -892,9 +1055,201 @@ class GlobalHotkeys(threading.Thread):
         return res
 
 
+# Mac 版：用 Carbon 的 RegisterEventHotKey 註冊全域快捷鍵（不需要「輔助使用」權限）。
+# 如果該組合已被系統或其他程式占用，註冊會失敗，所以可以偵測「已被占用」。
+
+# Windows 虛擬鍵碼（程式內部沿用）→ macOS 鍵碼
+MAC_KEYCODES = {
+    **{ord(c): k for c, k in zip("ASDFHGZXCVBQWERYT", (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12, 13, 14, 15, 16, 17))},
+    **{ord(c): k for c, k in zip("OUIPLJKNM", (31, 32, 34, 35, 37, 38, 40, 45, 46))},
+    **{ord(c): k for c, k in zip("123465", (18, 19, 20, 21, 22, 23))},
+    ord("9"): 25, ord("7"): 26, ord("8"): 28, ord("0"): 29,
+    0x20: 49, 0x25: 123, 0x27: 124, 0x28: 125, 0x26: 126, 0x21: 116, 0x22: 121,
+    0xBD: 27, 0xBB: 24, 0xBC: 43, 0xBE: 47,
+    **{0x6F + n: k for n, k in zip(range(1, 13), (122, 120, 99, 118, 96, 97, 98, 100, 101, 109, 103, 111))},
+}
+MAC_MODS = ((MOD_CONTROL, 0x1000), (MOD_ALT, 0x0800), (MOD_SHIFT, 0x0200), (MOD_WIN, 0x0100))
+
+
+class MacGlobalHotkeys:
+    TEST_ID = 0xBF00
+    SIGNATURE = 0x534F5248  # 'SORH'
+
+    def __init__(self, on_hotkey):
+        self.on_hotkey = on_hotkey
+        self.ready = threading.Event()
+        self.registered = {}  # id -> (mods, vk)
+        self.refs = {}        # id -> EventHotKeyRef
+        self.error = None
+        self._handler = None
+
+    def start(self):
+        """必須在主執行緒呼叫（事件會從主執行緒的事件迴圈送來）。"""
+        import ctypes as C
+
+        try:
+            self.C = C
+            carbon = self.carbon = C.CDLL("/System/Library/Frameworks/Carbon.framework/Carbon")
+
+            class EventTypeSpec(C.Structure):
+                _fields_ = [("eventClass", C.c_uint32), ("eventKind", C.c_uint32)]
+
+            class EventHotKeyID(C.Structure):
+                _fields_ = [("signature", C.c_uint32), ("id", C.c_uint32)]
+
+            self.HotKeyID = EventHotKeyID
+            upp = C.CFUNCTYPE(C.c_int32, C.c_void_p, C.c_void_p, C.c_void_p)
+            carbon.GetApplicationEventTarget.restype = C.c_void_p
+            carbon.InstallEventHandler.argtypes = [C.c_void_p, upp, C.c_uint32, C.POINTER(EventTypeSpec),
+                                                   C.c_void_p, C.c_void_p]
+            carbon.InstallEventHandler.restype = C.c_int32
+            carbon.RegisterEventHotKey.argtypes = [C.c_uint32, C.c_uint32, EventHotKeyID, C.c_void_p,
+                                                   C.c_uint32, C.POINTER(C.c_void_p)]
+            carbon.RegisterEventHotKey.restype = C.c_int32
+            carbon.UnregisterEventHotKey.argtypes = [C.c_void_p]
+            carbon.GetEventParameter.argtypes = [C.c_void_p, C.c_uint32, C.c_uint32, C.c_void_p, C.c_uint32,
+                                                 C.c_void_p, C.c_void_p]
+            carbon.GetEventParameter.restype = C.c_int32
+
+            def handler(call_ref, event, user_data):
+                try:
+                    hk = EventHotKeyID()
+                    st = carbon.GetEventParameter(event, 0x2D2D2D2D, 0x68606964, None, C.sizeof(hk), None, C.byref(hk))
+                    if st == 0 and hk.signature == self.SIGNATURE and hk.id != self.TEST_ID:
+                        self.on_hotkey(int(hk.id))
+                except Exception:
+                    log_error(traceback.format_exc())
+                return 0
+
+            self._handler = upp(handler)
+            spec = EventTypeSpec(0x6B657962, 5)  # kEventClassKeyboard, kEventHotKeyPressed
+            st = carbon.InstallEventHandler(carbon.GetApplicationEventTarget(), self._handler, 1,
+                                            C.byref(spec), None, None)
+            if st != 0:
+                self.error = f"InstallEventHandler 失敗（{st}）"
+        except Exception as e:
+            self.error = str(e)
+            log_error(traceback.format_exc())
+        self.ready.set()
+
+    def _register(self, hid, mods, vk):
+        """成功回傳 EventHotKeyRef，失敗（已被占用、不支援的鍵）回傳 None。"""
+        C = self.C
+        code = MAC_KEYCODES.get(vk)
+        if code is None:
+            return None
+        cm = 0
+        for mine, theirs in MAC_MODS:
+            if mods & mine:
+                cm |= theirs
+        ref = C.c_void_p()
+        st = self.carbon.RegisterEventHotKey(code, cm, self.HotKeyID(self.SIGNATURE, hid), self.carbon.GetApplicationEventTarget(),
+                                             0, C.byref(ref))
+        return ref if st == 0 and ref.value else None
+
+    def apply(self, bindings):
+        """bindings: {id: [mods, vk] 或 None}。回傳註冊失敗的 id 清單。"""
+        if self.error:
+            return list(bindings)
+        for ref in self.refs.values():
+            self.carbon.UnregisterEventHotKey(ref)
+        self.refs.clear()
+        self.registered.clear()
+        failed = []
+        for hid, combo in bindings.items():
+            if not combo:
+                continue
+            mods, vk = combo
+            ref = self._register(hid, mods, vk)
+            if ref is not None:
+                self.refs[hid] = ref
+                self.registered[hid] = (mods, vk)
+            else:
+                failed.append(hid)
+        return failed
+
+    def scan(self, mods, vks):
+        """檢查每個按鍵（搭配 mods）：'free' 可用、'taken' 已被系統或其他程式占用、'own' 本程式正在用。"""
+        res = {}
+        if self.error:
+            return res
+        own = set(self.registered.values())
+        for vk in vks:
+            if (mods, vk) in own:
+                res[vk] = "own"
+                continue
+            ref = self._register(self.TEST_ID, mods, vk)
+            if ref is not None:
+                self.carbon.UnregisterEventHotKey(ref)
+                res[vk] = "free"
+            else:
+                res[vk] = "taken"
+        return res
+
+
+GlobalHotkeys = MacGlobalHotkeys if IS_MAC else WinGlobalHotkeys
+
+
 # ---------------------------------------------------------------------------
 # 截圖：先拍下整個（多螢幕）桌面，再讓使用者框選範圍
 # ---------------------------------------------------------------------------
+
+def make_borderless(win, transparent=False, activates=True):
+    """無邊框視窗。Mac 用 Tk 的 MacWindowStyle（overrideredirect 的視窗在 Mac 收不到鍵盤）。"""
+    if IS_MAC:
+        try:
+            attrs = [] if activates else ["noActivates"]
+            win.tk.call("::tk::unsupported::MacWindowStyle", "style", win._w, "plain", attrs)
+        except Exception:
+            win.overrideredirect(True)
+        if transparent:
+            try:
+                win.attributes("-transparent", True)
+                win.configure(bg="systemTransparent")
+            except Exception:
+                pass
+    else:
+        win.overrideredirect(True)
+
+
+def mac_float(win, title, level=25, clear=False):
+    """Mac：讓視窗浮在所有視窗之上，也能浮在全螢幕的程式上面、出現在每個桌面空間。"""
+    if not IS_MAC:
+        return
+    try:
+        from AppKit import NSApp
+
+        win.title(title)
+        win.update_idletasks()
+        for w in NSApp.windows():
+            if str(w.title()) == title:
+                w.setLevel_(level)
+                w.setCollectionBehavior_(1 | 256)  # CanJoinAllSpaces | FullScreenAuxiliary
+                w.setHidesOnDeactivate_(False)
+                if clear:  # 圓形圖案的四個角要透明
+                    from AppKit import NSColor
+
+                    w.setOpaque_(False)
+                    w.setBackgroundColor_(NSColor.clearColor())
+                    w.setHasShadow_(False)
+    except Exception:
+        log_error("mac_float: " + traceback.format_exc())
+
+
+def mac_screen_access(request=False):
+    """Mac：是否已允許「螢幕錄製」（沒允許時截到的圖只有桌面背景）。"""
+    if not IS_MAC:
+        return True
+    try:
+        from Quartz import CGPreflightScreenCaptureAccess, CGRequestScreenCaptureAccess
+
+        ok = bool(CGPreflightScreenCaptureAccess())
+        if not ok and request:
+            CGRequestScreenCaptureAccess()
+        return ok
+    except Exception:
+        return True
+
 
 def _mss():
     import mss
@@ -909,7 +1264,9 @@ def grab_virtual_screen():
         mon = sct.monitors[0]  # 所有螢幕合併的虛擬桌面
         shot = sct.grab(mon)
         img = Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
-        return img, mon["left"], mon["top"]
+        # Mac 的 Retina 螢幕拍出來的像素比座標點數多（通常 2 倍）
+        scale = img.size[0] / max(1, mon["width"])
+        return img, mon["left"], mon["top"], scale
 
 
 def grab_rect(rect):
@@ -930,16 +1287,19 @@ class RegionSelector:
 
         self.root = root
         self.on_done = on_done
-        self.full, self.ox, self.oy = grab_virtual_screen()
-        w, h = self.full.size
+        self.full, self.ox, self.oy, self.sc = grab_virtual_screen()
+        w, h = round(self.full.size[0] / self.sc), round(self.full.size[1] / self.sc)  # 畫面上的大小（點數）
+        # 顯示用的圖：Retina 時縮到和畫面座標一樣大；真正辨識用的是原本的高解析度圖
+        self.view = self.full if self.sc == 1 else self.full.resize((w, h))
 
         self.win = tk.Toplevel(root)
-        self.win.overrideredirect(True)
+        make_borderless(self.win)
         self.win.attributes("-topmost", True)
         self.win.geometry(f"{w}x{h}+{self.ox}+{self.oy}")
         self.win.configure(cursor="crosshair")
+        mac_float(self.win, "sor-selector", level=1000)
 
-        dim = ImageEnhance.Brightness(self.full).enhance(0.55)
+        dim = ImageEnhance.Brightness(self.view).enhance(0.55)
         self.bg = ImageTk.PhotoImage(dim)
         self.canvas = tk.Canvas(self.win, width=w, height=h, highlightthickness=0, bd=0)
         self.canvas.pack(fill="both", expand=True)
@@ -959,7 +1319,8 @@ class RegionSelector:
         self.canvas.bind("<ButtonPress-1>", self._press)
         self.canvas.bind("<B1-Motion>", self._drag)
         self.canvas.bind("<ButtonRelease-1>", self._release)
-        self.canvas.bind("<ButtonPress-3>", lambda e: self._finish(None))
+        for b in RIGHT_BUTTONS:
+            self.canvas.bind(f"<ButtonPress-{b}>", lambda e: self._finish(None))
         self.win.bind("<Escape>", lambda e: self._finish(None))
         self.win.after(50, self._grab_focus)
 
@@ -990,7 +1351,7 @@ class RegionSelector:
         l, t, r, b = min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1)
         if r - l < 2 or b - t < 2:
             return
-        self.crop_photo = ImageTk.PhotoImage(self.full.crop((l, t, r, b)))
+        self.crop_photo = ImageTk.PhotoImage(self.view.crop((l, t, r, b)))
         if self.crop_item is None:
             self.crop_item = self.canvas.create_image(l, t, anchor="nw", image=self.crop_photo)
         else:
@@ -1006,7 +1367,8 @@ class RegionSelector:
         if r - l < 5 or b - t < 5:
             self.start = None
             return
-        img = self.full.crop((l, t, r, b))
+        k = self.sc
+        img = self.full.crop((round(l * k), round(t * k), round(r * k), round(b * k)))
         rect = (l + self.ox, t + self.oy, r + self.ox, b + self.oy)
         self._finish((img, rect))
 
@@ -1033,13 +1395,17 @@ class MiniIcon:
         self.app = app
         self.win = tk.Toplevel(app.root)
         self.win.withdraw()
-        self.win.overrideredirect(True)
+        make_borderless(self.win, transparent=True, activates=False)
         self.win.attributes("-topmost", True)
-        self.win.configure(bg=self.KEY)
-        try:
-            self.win.attributes("-transparentcolor", self.KEY)
-        except Exception:
-            pass
+        if IS_MAC:
+            self.KEY = "systemTransparent"
+        else:
+            self.win.configure(bg=self.KEY)
+            try:
+                self.win.attributes("-transparentcolor", self.KEY)
+            except Exception:
+                pass
+        mac_float(self.win, "sor-mini", clear=True)
         self.canvas = tk.Canvas(self.win, bg=self.KEY, highlightthickness=0, bd=0, cursor="hand2")
         self.canvas.pack()
         self.state = "idle"
@@ -1052,7 +1418,8 @@ class MiniIcon:
         self.canvas.bind("<ButtonPress-1>", self._press)
         self.canvas.bind("<B1-Motion>", self._motion)
         self.canvas.bind("<ButtonRelease-1>", self._release)
-        self.canvas.bind("<ButtonPress-3>", self._menu)
+        for b in RIGHT_BUTTONS:
+            self.canvas.bind(f"<ButtonPress-{b}>", self._menu)
         self.canvas.bind("<Enter>", self._enter)
         self.canvas.bind("<Leave>", lambda e: self._hide_tip())
         self._redraw()
@@ -1060,7 +1427,7 @@ class MiniIcon:
 
     @property
     def size(self):
-        scale = self.app.root.winfo_fpixels("1i") / 96.0
+        scale = 1.0 if IS_MAC else self.app.root.winfo_fpixels("1i") / 96.0
         return int(int(self.app.settings.get("mini_size", 64)) * scale)
 
     def _redraw(self):
@@ -1108,12 +1475,16 @@ class MiniIcon:
         if x is None or y is None:
             x, y = sw - w - 40, sh // 3
         # 不要跑出螢幕外（考慮多螢幕時用虛擬桌面範圍）
-        try:
-            from ctypes import windll
-            vx, vy = windll.user32.GetSystemMetrics(76), windll.user32.GetSystemMetrics(77)
-            sw, sh = windll.user32.GetSystemMetrics(78), windll.user32.GetSystemMetrics(79)
-        except Exception:
-            pass
+        if IS_MAC:
+            vy += 28  # 不要蓋到最上面的選單列
+            sh -= 28
+        else:
+            try:
+                from ctypes import windll
+                vx, vy = windll.user32.GetSystemMetrics(76), windll.user32.GetSystemMetrics(77)
+                sw, sh = windll.user32.GetSystemMetrics(78), windll.user32.GetSystemMetrics(79)
+            except Exception:
+                pass
         x = max(vx, min(int(x), vx + sw - w))
         y = max(vy, min(int(y), vy + sh - w))
         self.win.geometry(f"+{x}+{y}")
@@ -1179,7 +1550,7 @@ class MiniIcon:
     def _bubble(self, text):
         tk = self.app.tk
         b = tk.Toplevel(self.win)
-        b.overrideredirect(True)
+        make_borderless(b, activates=False)
         b.attributes("-topmost", True)
         tk.Label(b, text=text, bg="#333333", fg="white", justify="left",
                  font=(UI_FONT, 11), padx=10, pady=6).pack()
@@ -1189,6 +1560,7 @@ class MiniIcon:
         w = self.win.winfo_width()
         bx = x - bw - 6 if x - bw - 6 > self.win.winfo_vrootx() else x + w + 6
         b.geometry(f"+{bx}+{y + max(0, (w - bh) // 2)}")
+        mac_float(b, f"sor-bubble-{id(b)}", level=101)
         return b
 
     def toast(self, text, ms=2500):
@@ -1221,7 +1593,7 @@ class HotkeyDialog:
         frm = ttk.Frame(w, padding=12)
         frm.pack(fill="both", expand=True)
         ttk.Label(frm, text="勾選要一起按的鍵，再選一個字母或數字。\n"
-                            "清單中標「✖ 已被占用」的組合，是 Windows 或其他程式已經在用的，不能選。",
+                            "清單中標「✖ 已被占用」的組合，是" + ("系統" if IS_MAC else "Windows") + "或其他程式已經在用的，不能選。",
                   justify="left").grid(row=0, column=0, columnspan=8, sticky="w", pady=(0, 8))
         self.rows = {}
         cfg = app.hotkeys_cfg
@@ -1236,7 +1608,7 @@ class HotkeyDialog:
                 "key": tk.StringVar(value=VK_NAME.get(combo[1], self.NONE) if combo else self.NONE),
             }
             ttk.Label(frm, text=HOTKEY_NAMES[hid], width=9).grid(row=r, column=0, sticky="w", pady=4)
-            for c, (k, label) in enumerate((("ctrl", "Ctrl"), ("alt", "Alt"), ("shift", "Shift"), ("win", "Win")), start=1):
+            for c, (k, label) in enumerate((("ctrl", "Ctrl"), ("alt", "Option" if IS_MAC else "Alt"), ("shift", "Shift"), ("win", "Cmd" if IS_MAC else "Win")), start=1):
                 ttk.Checkbutton(frm, text=label, variable=row[k],
                                 command=lambda h=hid: self.refresh(h)).grid(row=r, column=c, padx=2)
             ttk.Label(frm, text="＋").grid(row=r, column=5)
@@ -1300,7 +1672,7 @@ class HotkeyDialog:
         if not name:
             row["status"].configure(text="（不使用這個快捷鍵）", foreground="#666")
         elif not mods & (MOD_CONTROL | MOD_ALT | MOD_WIN):
-            row["status"].configure(text="⚠ 至少要勾 Ctrl、Alt 或 Win", foreground="#c62828")
+            row["status"].configure(text="⚠ 至少要勾 Ctrl、" + ("Option 或 Cmd" if IS_MAC else "Alt 或 Win"), foreground="#c62828")
             row["ok"] = False
         elif res.get(dict(KEY_CHOICES)[name]) == "taken":
             row["status"].configure(text="❌ 已被占用，請換一個", foreground="#c62828")
@@ -1446,7 +1818,7 @@ class PronDialog:
 # 主視窗
 # ---------------------------------------------------------------------------
 
-class TrayIcon:
+class WinTrayIcon:
     """工作列右下角（系統匣）的小圖示。左鍵：打開完整面板；右鍵：選單（含完全關閉程式）。"""
 
     def __init__(self, app):
@@ -1497,6 +1869,137 @@ class TrayIcon:
                 pass
 
 
+_MAC_TRAY_TARGET = None
+
+
+def _mac_tray_target_class():
+    global _MAC_TRAY_TARGET
+    if _MAC_TRAY_TARGET is None:
+        from Foundation import NSObject
+        import objc
+
+        class TrayTarget(NSObject):
+            def initWithTray_(self, tray):
+                self = objc.super(type(self), self).init()
+                if self is None:
+                    return None
+                self.tray = tray
+                return self
+
+            def statusClick_(self, sender):
+                self.tray.on_click()
+
+            def menuPick_(self, sender):
+                self.tray.app.events.put(("tray", str(sender.representedObject())))
+
+        _MAC_TRAY_TARGET = TrayTarget
+    return _MAC_TRAY_TARGET
+
+
+class MacTrayIcon:
+    """選單列（螢幕最上方右側）的小圖示。左鍵：打開完整面板；右鍵：選單（含完全關閉程式）。"""
+
+    def __init__(self, app):
+        self.app = app
+        self.item = None
+        try:
+            import io
+
+            from AppKit import NSImage, NSStatusBar
+            from Foundation import NSData
+            from PIL import Image
+
+            img = Image.open(resource_path("icon.ico")).convert("RGBA").resize((44, 44), Image.LANCZOS)
+            buf = io.BytesIO()
+            img.save(buf, "PNG")
+            data = NSData.dataWithBytes_length_(buf.getvalue(), len(buf.getvalue()))
+            nsimg = NSImage.alloc().initWithData_(data)
+            nsimg.setSize_((20, 20))
+            self.target = _mac_tray_target_class().alloc().initWithTray_(self)
+            self.item = NSStatusBar.systemStatusBar().statusItemWithLength_(-1)  # NSVariableStatusItemLength
+            btn = self.item.button()
+            btn.setImage_(nsimg)
+            btn.setToolTip_(APP_NAME)
+            btn.setTarget_(self.target)
+            btn.setAction_("statusClick:")
+            btn.sendActionOn_(4 | 16)  # 左鍵放開、右鍵放開
+        except Exception:
+            log_error("tray: " + traceback.format_exc())
+
+    def on_click(self):
+        from AppKit import NSApp
+
+        ev = NSApp.currentEvent()
+        right = ev is not None and (ev.type() == 4 or (int(ev.modifierFlags()) & 0x40000))  # 右鍵或 Control＋點
+        if right:
+            self._show_menu()
+        else:
+            self.app.events.put(("tray", "panel"))
+
+    def _menu(self):
+        from AppKit import NSMenu, NSMenuItem
+
+        app = self.app
+        m = NSMenu.alloc().init()
+        m.setAutoenablesItems_(False)
+
+        def add(title, kind, checked=False):
+            it = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(title, "menuPick:", "")
+            it.setTarget_(self.target)
+            it.setRepresentedObject_(kind)
+            if checked:
+                it.setState_(1)
+            m.addItem_(it)
+
+        def sep():
+            m.addItem_(NSMenuItem.separatorItem())
+
+        add("🗔 打開完整面板", "panel")
+        add("⚪ 顯示浮動圖案", "mini")
+        sep()
+        add("📷 框選截圖", "capture")
+        add("↻ 同一區再截一次", "repeat")
+        add("⏯ 暫停／播放", "pause")
+        add("⏹ 停止朗讀", "stop")
+        add("語速加快 ＋1", "faster")
+        add("語速放慢 −1", "slower")
+        add("文字放大", "font_up")
+        add("文字縮小", "font_down")
+        sep()
+        vertical = getattr(app, "read_dir", "h") == "v"
+        add("橫式閱讀（左→右）", "dir_h", checked=not vertical)
+        add("直式閱讀（上→下、右→左）", "dir_v", checked=vertical)
+        sep()
+        add("✖ 完全關閉程式", "quit")
+        return m
+
+    def _show_menu(self):
+        if not self.item:
+            return
+        self.item.setMenu_(self._menu())
+        self.item.button().performClick_(None)
+        self.item.setMenu_(None)
+
+    def notify(self, msg):
+        try:
+            self.app.toast(msg)
+        except Exception:
+            pass
+
+    def stop(self):
+        if self.item:
+            try:
+                from AppKit import NSStatusBar
+
+                NSStatusBar.systemStatusBar().removeStatusItem_(self.item)
+            except Exception:
+                pass
+            self.item = None
+
+
+TrayIcon = MacTrayIcon if IS_MAC else WinTrayIcon
+
+
 class RedDot:
     """透明度低於 40% 時顯示的不透明小紅點（呼吸燈），讓使用者找得到視窗。"""
 
@@ -1508,14 +2011,18 @@ class RedDot:
         self.target = target  # "panel" 或 "mini"
         self.win = tk.Toplevel(app.root)
         self.win.withdraw()
-        self.win.overrideredirect(True)
+        make_borderless(self.win, transparent=True, activates=False)
         self.win.attributes("-topmost", True)
-        self.win.configure(bg=self.KEY)
-        try:
-            self.win.attributes("-transparentcolor", self.KEY)
-        except Exception:
-            pass
-        scale = app.root.winfo_fpixels("1i") / 96.0
+        if IS_MAC:
+            self.KEY = "systemTransparent"
+        else:
+            self.win.configure(bg=self.KEY)
+            try:
+                self.win.attributes("-transparentcolor", self.KEY)
+            except Exception:
+                pass
+        mac_float(self.win, f"sor-dot-{target}", level=26, clear=True)
+        scale = 1.0 if IS_MAC else app.root.winfo_fpixels("1i") / 96.0
         self.core = int(12 * scale)
         self.size = self.core * 2 + 4
         self.canvas = tk.Canvas(self.win, width=self.size, height=self.size, bg=self.KEY,
@@ -1528,7 +2035,8 @@ class RedDot:
             c.bind("<ButtonPress-1>", mini._press)
             c.bind("<B1-Motion>", mini._motion)
             c.bind("<ButtonRelease-1>", mini._release)
-            c.bind("<ButtonPress-3>", mini._menu)
+            for b in RIGHT_BUTTONS:
+                c.bind(f"<ButtonPress-{b}>", mini._menu)
         else:
             c.bind("<ButtonPress-1>", lambda e: (app.reveal("panel"), app.root.lift()))
         c.bind("<Enter>", lambda e: app.reveal(target))
@@ -1566,7 +2074,7 @@ class App:
         self.hotkeys_cfg = load_hotkeys(self.settings)
         self.pron = PronBook()
         self.ocr = OcrEngine()
-        self.sapi = SapiSpeaker()
+        self.sapi = MacSpeaker() if IS_MAC else SapiSpeaker()
         self.google = GoogleSpeaker()
         self.cur = None          # 正在念的語音引擎
         self.reading = None      # {"base", "map", "spoken", "voice"}
@@ -1586,6 +2094,14 @@ class App:
         self.settings.update(voice=GOOGLE_VOICE, rate=0, volume=100, alpha=1.0)
 
         root = self.root = tk.Tk()
+        if IS_MAC:
+            # 選單列小程式：不佔 Dock、不出現在 Cmd+Tab 清單
+            try:
+                from AppKit import NSApp
+
+                NSApp.setActivationPolicy_(1)  # NSApplicationActivationPolicyAccessory
+            except Exception:
+                log_error("policy: " + traceback.format_exc())
         root.withdraw()
         root.title(APP_NAME)
         root.attributes("-topmost", True)
@@ -1609,7 +2125,7 @@ class App:
         style.configure("TCheckbutton", font=font)
         style.configure("TRadiobutton", font=font)
         style.configure("TLabelframe.Label", font=(UI_FONT, 10))
-        style.configure("Treeview", font=(UI_FONT, 11), rowheight=int(root.winfo_fpixels("1i") / 96 * 26))
+        style.configure("Treeview", font=(UI_FONT, 11), rowheight=int((1.0 if IS_MAC else root.winfo_fpixels("1i") / 96) * 26))
         style.configure("Treeview.Heading", font=(UI_FONT, 11, "bold"))
 
         # --- 上方按鈕列 ---
@@ -1633,7 +2149,8 @@ class App:
         # --- 最下方：狀態列、快捷鍵說明（一直顯示）---
         self.status = ttk.Label(root, text="", foreground="#555", padding=(8, 0, 8, 4))
         self.status.pack(side="bottom", fill="x")
-        self.info_label = ttk.Label(root, foreground="#555", justify="left", padding=(8, 2, 8, 2))
+        self.info_label = ttk.Label(root, foreground="#555", justify="left", padding=(8, 2, 8, 2),
+                                    wraplength=620 if IS_MAC else 0)
         self.info_label.pack(side="bottom", fill="x")
 
         # --- 設定區（在文字框下方，按 ⚙ 可收合）---
@@ -1651,8 +2168,19 @@ class App:
 
         def slider(row, label, var, lo, hi, res, cmd):
             ttk.Label(opt, text=label).grid(row=row, column=0, sticky="w")
-            tk.Scale(opt, from_=lo, to=hi, resolution=res, orient="horizontal", showvalue=False,
-                     variable=var, command=lambda v: cmd()).grid(row=row, column=1, sticky="we", padx=4)
+            if IS_MAC:
+                # Mac 上用 ttk 的滑桿（外觀跟著系統深色／淺色）；自己處理「一格一格」的刻度
+                def on_move(v, var=var, res=res, cmd=cmd):
+                    x = round(float(v) / res) * res
+                    x = int(x) if res >= 1 else round(x, 2)
+                    if var.get() != x:
+                        var.set(x)
+                    cmd()
+                ttk.Scale(opt, from_=lo, to=hi, orient="horizontal", variable=var,
+                          command=on_move).grid(row=row, column=1, sticky="we", padx=4)
+            else:
+                tk.Scale(opt, from_=lo, to=hi, resolution=res, orient="horizontal", showvalue=False,
+                         variable=var, command=lambda v: cmd()).grid(row=row, column=1, sticky="we", padx=4)
             lab = ttk.Label(opt, width=5)
             lab.grid(row=row, column=2, sticky="w")
             return lab
@@ -1697,7 +2225,7 @@ class App:
         ttk.Checkbutton(checks, text="顯示文字框", variable=self.show_var,
                         command=self.toggle_text).pack(side="left", padx=(12, 0))
         self.clickread_var = tk.BooleanVar(value=bool(self.settings.get("click_read", True)))
-        ttk.Checkbutton(checks, text="Ctrl＋點字就從那裡開始念", variable=self.clickread_var).pack(side="left", padx=(12, 0))
+        ttk.Checkbutton(checks, text=CLICK_READ_LABEL, variable=self.clickread_var).pack(side="left", padx=(12, 0))
         r += 1
         tools = ttk.Frame(opt)
         tools.grid(row=r, column=0, columnspan=3, sticky="w", pady=(6, 2))
@@ -1716,7 +2244,8 @@ class App:
         self.text.configure(yscrollcommand=sb.set)
         self.text.pack(side="left", fill="both", expand=True)
         sb.pack(side="right", fill="y")
-        self.text.bind("<Button-3>", self._text_menu)
+        for b in RIGHT_BUTTONS:
+            self.text.bind(f"<Button-{b}>", self._text_menu)
         self.text.bind("<ButtonPress-1>", self._text_press, add="+")
         self.text.bind("<ButtonRelease-1>", self._text_release, add="+")
         self._press_at = None
@@ -1745,7 +2274,8 @@ class App:
         if self.sapi.error:
             msg = "找不到語音引擎：" + self.sapi.error
         elif not self.sapi.has_chinese_voice():
-            msg = "電腦沒有中文語音：請到 設定→時間與語言→語音 新增「中文(台灣)」"
+            msg = ("電腦沒有中文語音：請到 系統設定→輔助使用→朗讀內容→系統語音→管理語音，下載「中文（台灣）」"
+                   if IS_MAC else "電腦沒有中文語音：請到 設定→時間與語言→語音 新增「中文(台灣)」")
         self.set_status(msg)
 
         self.tray = TrayIcon(self)
@@ -1780,7 +2310,7 @@ class App:
             f"{hotkey_text(hk.get(HK_PAUSE))} 暫停／播放　{hotkey_text(hk.get(HK_STOP))} 停止朗讀\n"
             f"　　　　　{hotkey_text(hk.get(HK_FASTER))} 語速加快　{hotkey_text(hk.get(HK_SLOWER))} 語速放慢　"
             f"{hotkey_text(hk.get(HK_FONT_UP))} 文字放大　{hotkey_text(hk.get(HK_FONT_DOWN))} 文字縮小\n"
-            f"小技巧：按住 Ctrl 點文字框裡的某個字，就從那個字開始念（一般點一下可以直接改字）；反白一段再按「朗讀」只念那一段；"
+            f"小技巧：按住 {'⌘ 或 Ctrl' if IS_MAC else 'Ctrl'} 點文字框裡的某個字，就從那個字開始念（一般點一下可以直接改字）；反白一段再按「朗讀」只念那一段；"
             f"文字上按右鍵可設定唸法。　版本 {APP_VERSION}"))
 
     def set_status(self, msg):
@@ -1794,6 +2324,25 @@ class App:
         elif self.mode == "tray":
             self.tray.notify(msg)
 
+    def toast(self, msg, ms=3500):
+        """螢幕右上角的小提示（面板收起來、沒有狀態列可看的時候用）。"""
+        tk = self.tk
+        old = getattr(self, "_toast", None)
+        if old is not None:
+            try:
+                old.destroy()
+            except Exception:
+                pass
+        t = self._toast = tk.Toplevel(self.root)
+        make_borderless(t, activates=False)
+        t.attributes("-topmost", True)
+        tk.Label(t, text=msg, bg="#333333", fg="white", justify="left", font=(UI_FONT, 12), padx=14, pady=10).pack()
+        t.update_idletasks()
+        sw = t.winfo_screenwidth()
+        t.geometry(f"+{max(0, sw - t.winfo_reqwidth() - 20)}+{40 if IS_MAC else 20}")
+        mac_float(t, f"sor-toast-{id(t)}", level=101)
+        t.after(ms, lambda: t.winfo_exists() and t.destroy())
+
     def center_on_screen(self, win):
         win.update_idletasks()
         if self.mode == "mini":
@@ -1804,10 +2353,11 @@ class App:
             x, y = win.winfo_screenwidth() // 2, win.winfo_screenheight() // 4
         w, h = win.winfo_reqwidth(), win.winfo_reqheight()
         sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
-        x = max(0, min(x - w // 3, sw - w))
+        x = max(0, min(x + 30 if IS_MAC else x - w // 3, sw - w))
         y = max(0, min(y + 40, sh - h - 40))
         win.geometry(f"+{x}+{y}")
         win.lift()
+        mac_float(win, win.title(), level=27)  # Mac：要浮在面板（層級 25）上面
         win.focus_force()
 
     def toggle_options(self):
@@ -1971,6 +2521,14 @@ class App:
         self.root.deiconify()
         self.root.attributes("-topmost", True)
         self.root.lift()
+        mac_float(self.root, APP_NAME)
+        if IS_MAC:
+            try:
+                from AppKit import NSApp
+
+                NSApp.activateIgnoringOtherApps_(True)  # 面板要能打字
+            except Exception:
+                pass
         self.apply_alpha()
 
     def build_menu(self, parent):
@@ -2030,7 +2588,7 @@ class App:
 
         m.add_checkbutton(label="截圖後自動朗讀", variable=self.auto_var)
         m.add_checkbutton(label="跟讀標示", variable=self.follow_var, command=self._clear_highlight)
-        m.add_checkbutton(label="Ctrl＋點字就從那裡開始念", variable=self.clickread_var)
+        m.add_checkbutton(label=CLICK_READ_LABEL, variable=self.clickread_var)
         m.add_separator()
         m.add_command(label="📋 複製辨識出的文字", command=self.copy_text)
         m.add_command(label="📖 多音字唸法設定…", command=self.open_pron)
@@ -2074,6 +2632,10 @@ class App:
 
     def _text_menu(self, e):
         tk = self.tk
+        if IS_MAC and (e.state & 0x4) and self.clickread_var.get():
+            # Mac 上 Control＋點一下會被系統當成右鍵，這裡把它當成「從這個字開始念」
+            self._click_read_at(e)
+            return
         m = tk.Menu(self.root, tearoff=0, font=(UI_FONT, 11))
         try:
             sel = self.text.get("sel.first", "sel.last").strip()
@@ -2133,8 +2695,17 @@ class App:
             self.root.deiconify()
             self.root.attributes("-topmost", True)
 
+    def _need_screen_access(self):
+        """Mac：沒允許「螢幕錄製」就截不到其他視窗的內容，先提醒。"""
+        if mac_screen_access(request=True):
+            return False
+        self.notify("要先允許「螢幕錄製」：系統設定→隱私權與安全性→螢幕與系統錄音，打開本程式，再重開程式")
+        return True
+
     def start_capture(self):
         if self.busy:
+            return
+        if self._need_screen_access():
             return
         self.busy = True
         self.stop_speech()
@@ -2161,7 +2732,7 @@ class App:
         self._run_ocr(img)
 
     def repeat_capture(self):
-        if self.busy or not self.last_rect:
+        if self.busy or not self.last_rect or self._need_screen_access():
             return
         self.busy = True
         self.stop_speech()
@@ -2262,8 +2833,12 @@ class App:
         x0, y0, state = p
         if abs(e.x - x0) > 4 or abs(e.y - y0) > 4:  # 拖曳反白
             return
-        if not (state & 0x4) or state & 0x1:  # 要按著 Ctrl、沒按 Shift
+        want = 0x4 | (0x8 if IS_MAC else 0)  # Mac 也可以按 ⌘（Command）
+        if not (state & want) or state & 0x1:  # 要按著 Ctrl（Mac：或 ⌘）、沒按 Shift
             return
+        self._click_read_at(e)
+
+    def _click_read_at(self, e):
         idx = self.text.index(f"@{e.x},{e.y}")
         box = self.text.bbox(idx)
         if not box or not (box[0] <= e.x <= box[0] + box[2] and box[1] <= e.y <= box[1] + box[3]):
@@ -2318,6 +2893,8 @@ class App:
             self.google.set_rate(self.rate_var.get())
             self.google.set_volume(self.vol_var.get())
             return
+        if hasattr(self.sapi, "set_live") and self.cur is self.sapi:
+            self.sapi.set_live(int(self.rate_var.get()), int(self.vol_var.get()))  # 音量馬上生效
         if self._live_job:
             self.root.after_cancel(self._live_job)
         self._live_job = self.root.after(250, self._apply_live_sapi)
@@ -2330,8 +2907,11 @@ class App:
             return
         if sp.paused:
             try:
-                sp.voice.Rate = int(self.rate_var.get())
-                sp.voice.Volume = int(self.vol_var.get())
+                if hasattr(sp, "set_live"):
+                    sp.set_live(int(self.rate_var.get()), int(self.vol_var.get()))
+                else:
+                    sp.voice.Rate = int(self.rate_var.get())
+                    sp.voice.Volume = int(self.vol_var.get())
             except Exception:
                 pass
             return
@@ -2490,7 +3070,8 @@ def selftest(out_path):
         img = Image.new("RGB", (700, 140), "white")
         d = ImageDraw.Draw(img)
         font = None
-        for f in (r"C:\Windows\Fonts\msjh.ttc", r"C:\Windows\Fonts\mingliu.ttc", r"C:\Windows\Fonts\msyh.ttc",
+        for f in ("/System/Library/Fonts/PingFang.ttc", "/System/Library/Fonts/STHeiti Medium.ttc",
+                  "/System/Library/Fonts/Hiragino Sans GB.ttc", r"C:\Windows\Fonts\msjh.ttc", r"C:\Windows\Fonts\mingliu.ttc", r"C:\Windows\Fonts\msyh.ttc",
                   "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc"):
             if os.path.exists(f):
                 font = ImageFont.truetype(f, 32)
@@ -2536,13 +3117,13 @@ def selftest(out_path):
 
     try:
         import mss  # noqa: F401
-        img, ox, oy = grab_virtual_screen()
-        lines.append(f"Screen grab: {img.size} at ({ox},{oy})")
+        img, ox, oy, sc = grab_virtual_screen()
+        lines.append(f"Screen grab: {img.size} at ({ox},{oy}) scale={sc} screen-access={mac_screen_access()}")
     except Exception:
         lines.append("SCREEN WARN:\n" + traceback.format_exc())
 
     try:
-        sp = SapiSpeaker()
+        sp = MacSpeaker() if IS_MAC else SapiSpeaker()
         lines.append(f"Voices: {sp.voice_names()} default={sp.default_voice()!r} error={sp.error!r}")
     except Exception:
         lines.append("TTS WARN:\n" + traceback.format_exc())
@@ -2551,10 +3132,14 @@ def selftest(out_path):
         from gtts import gTTS
         import miniaudio  # noqa: F401
         lines.append("gTTS + miniaudio import OK")
-        import pystray
-        from PIL import Image as _Img
-        pystray.Icon("selftest", _Img.open(resource_path("icon.ico")), "t")
-        lines.append(f"Tray icon OK ({pystray.Icon.__module__})")
+        if IS_MAC:
+            from AppKit import NSStatusBar  # noqa: F401
+            lines.append("Menu bar (AppKit) OK; icon file: " + str(os.path.exists(resource_path("icon.ico"))))
+        else:
+            import pystray
+            from PIL import Image as _Img
+            pystray.Icon("selftest", _Img.open(resource_path("icon.ico")), "t")
+            lines.append(f"Tray icon OK ({pystray.Icon.__module__})")
         try:
             p = os.path.join(tempfile.gettempdir(), "sor_selftest.mp3")
             gTTS("測試", lang="zh-TW", lang_check=False).save(p)
@@ -2574,7 +3159,7 @@ def selftest(out_path):
         hk.ready.wait(2)
         res = hk.scan(MOD_CONTROL | MOD_ALT, [0x52, 0x45, 0x53])
         lines.append(f"Hotkey scan Ctrl+Alt+R/E/S: {res}")
-        if IS_WINDOWS and len(res) != 3:
+        if (IS_WINDOWS or IS_MAC) and len(res) != 3:
             ok = False
             lines.append("FAIL: hotkey scan")
     except Exception:
@@ -2602,6 +3187,17 @@ def main():
     set_dpi_aware()
 
     # 只允許開一個
+    if IS_MAC:
+        import fcntl
+
+        global _LOCK_FILE
+        _LOCK_FILE = open(os.path.join(data_dir(), "app.lock"), "w")
+        try:
+            fcntl.flock(_LOCK_FILE, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            os.system("osascript -e 'display dialog \"截圖朗讀小幫手已經在執行了（看螢幕最上方選單列右側的圖示）。\" "
+                      "buttons {\"好\"} default button 1 with icon note' >/dev/null 2>&1")
+            return
     if IS_WINDOWS:
         ctypes.windll.kernel32.CreateMutexW(None, False, "ScreenOCRReader_SingleInstance")
         if ctypes.windll.kernel32.GetLastError() == 183:
@@ -2613,6 +3209,9 @@ def main():
         err = traceback.format_exc()
         log_error(err)
         log = os.path.join(data_dir(), "error.log")
+        if IS_MAC:
+            msg = ("程式發生錯誤，詳細記錄在：" + log).replace('"', "'")
+            os.system(f"osascript -e 'display dialog \"{msg}\" buttons {{\"好\"}} with icon stop' >/dev/null 2>&1")
         if IS_WINDOWS:
             ctypes.windll.user32.MessageBoxW(None, f"程式發生錯誤：\n{err[-800:]}\n\n詳細記錄：{log}", APP_NAME, 0x10)
         raise

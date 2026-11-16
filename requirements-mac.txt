@@ -1,0 +1,10 @@
+rapidocr==3.10.0
+onnxruntime>=1.18,<2
+mss>=9
+Pillow>=10
+numpy>=1.26,<3
+gTTS>=2.5
+miniaudio>=1.59
+pyobjc-framework-Cocoa>=10
+pyobjc-framework-Quartz>=10
+pyobjc-framework-AVFoundation>=10
