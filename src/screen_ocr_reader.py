@@ -2338,8 +2338,14 @@ class App:
         try:
             menu.tk_popup(x, y)
         finally:
-            menu.grab_release()
+            try:
+                menu.grab_release()
+            except Exception:
+                pass
             self._menu_open = False
+        if getattr(self, "_quit_pending", False):
+            self._quit_pending = False
+            self.root.after(50, self.quit)
 
     @property
     def mini_mode(self):
@@ -2491,6 +2497,8 @@ class App:
             self.dots["mini"].update(False)
 
     def _on_tk_error(self, exc, val, tb):
+        if "application has been destroyed" in str(val) or "invalid command name" in str(val):
+            return  # 程式正在關閉時的殘餘錯誤，不用理它
         err = "".join(traceback.format_exception(exc, val, tb))
         log_error(err)
         self.notify(f"發生錯誤：{val}")
@@ -2756,9 +2764,12 @@ class App:
 
     def _need_screen_access(self):
         """Mac：沒允許「螢幕錄製」就截不到其他視窗的內容，先提醒。"""
-        if mac_screen_access(request=True):
+        first = not getattr(self, "_asked_screen", False)
+        self._asked_screen = True
+        if mac_screen_access(request=first):  # 系統的授權視窗每次啟動只跳一次
             return False
-        self.notify("要先允許「螢幕錄製」：系統設定→隱私權與安全性→螢幕與系統錄音，打開本程式，再重開程式")
+        self.notify("還沒允許「螢幕錄製」：系統設定→隱私權與安全性→螢幕與系統錄音。"
+                    "如果已經打開還是這樣（更新過程式後會發生），請先按「−」移除本程式，再按「＋」重新加入，然後完全關閉程式再重開")
         return True
 
     def start_capture(self):
@@ -3073,6 +3084,9 @@ class App:
         self.text.see(f"{base}+{a}c")
 
     def quit(self):
+        if getattr(self, "_menu_open", False):
+            self._quit_pending = True  # 選單還開著：等選單關掉後再結束，免得出錯
+            return
         try:
             self.stop_speech()
             self.google.cleanup()
@@ -3273,7 +3287,9 @@ def main():
             return
     try:
         App().run()
-    except Exception:
+    except Exception as e:
+        if "application has been destroyed" in str(e) or "invalid command name" in str(e):
+            return  # 關閉程式時的殘餘錯誤
         err = traceback.format_exc()
         log_error(err)
         log = os.path.join(data_dir(), "error.log")
