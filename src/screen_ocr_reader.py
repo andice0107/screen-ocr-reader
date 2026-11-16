@@ -1418,8 +1418,9 @@ class MiniIcon:
         self.canvas.bind("<ButtonPress-1>", self._press)
         self.canvas.bind("<B1-Motion>", self._motion)
         self.canvas.bind("<ButtonRelease-1>", self._release)
-        for b in RIGHT_BUTTONS:
-            self.canvas.bind(f"<ButtonPress-{b}>", self._menu)
+        if not IS_MAC:  # Mac 的右鍵由 App._install_mac_rightclick 用原生事件處理（兩邊都接會同時開兩個選單而當掉）
+            for b in RIGHT_BUTTONS:
+                self.canvas.bind(f"<ButtonPress-{b}>", self._menu)
         self.canvas.bind("<Enter>", self._enter)
         self.canvas.bind("<Leave>", lambda e: self._hide_tip())
         self._redraw()
@@ -2035,8 +2036,9 @@ class RedDot:
             c.bind("<ButtonPress-1>", mini._press)
             c.bind("<B1-Motion>", mini._motion)
             c.bind("<ButtonRelease-1>", mini._release)
-            for b in RIGHT_BUTTONS:
-                c.bind(f"<ButtonPress-{b}>", mini._menu)
+            if not IS_MAC:
+                for b in RIGHT_BUTTONS:
+                    c.bind(f"<ButtonPress-{b}>", mini._menu)
         else:
             c.bind("<ButtonPress-1>", lambda e: (app.reveal("panel"), app.root.lift()))
         c.bind("<Enter>", lambda e: app.reveal(target))
@@ -2314,7 +2316,9 @@ class App:
                         w = ev.window()
                         title = str(w.title()) if w is not None else ""
                         if title in ("sor-mini", "sor-dot-mini"):
-                            self.root.after(0, self._mini_menu_at_pointer)
+                            # 注意：這裡是在 macOS 的事件回呼裡，不能呼叫任何 Tk 的東西（會讓 Tk 當掉）；
+                            # 只把「要開選單」放進佇列，交給 Tk 自己的計時器去處理
+                            self.events.put(("mini_menu", None))
                             return None  # 這個事件我們處理掉
                 except Exception:
                     log_error("rightclick: " + traceback.format_exc())
@@ -2325,6 +2329,9 @@ class App:
             log_error("rightclick monitor: " + traceback.format_exc())
 
     def _mini_menu_at_pointer(self):
+        if getattr(self, "_menu_open", False):
+            return  # 選單已經開著，不要再開一個（選單裡面再開選單會當掉）
+        self._menu_open = True
         self.mini._hide_tip()
         x, y = self.root.winfo_pointerxy()
         menu = self.build_menu(self.mini.win)
@@ -2332,6 +2339,7 @@ class App:
             menu.tk_popup(x, y)
         finally:
             menu.grab_release()
+            self._menu_open = False
 
     @property
     def mini_mode(self):
@@ -2523,6 +2531,8 @@ class App:
                      "slower": lambda: self._nudge_rate(-1, show=True),
                      "font_up": lambda: self._nudge_font(1, show=True),
                      "font_down": lambda: self._nudge_font(-1, show=True)}[payload]()
+                elif kind == "mini_menu":
+                    self._mini_menu_at_pointer()
                 elif kind == "ocr_done":
                     self._ocr_done(payload)
                 elif kind == "error":
