@@ -2264,6 +2264,7 @@ class App:
                 pass
 
         if IS_MAC:
+            self._install_mac_rightclick()
             try:
                 import signal
 
@@ -2298,6 +2299,39 @@ class App:
         # 背景先載入 OCR 模型，第一次截圖會比較快
         threading.Thread(target=self._preload, daemon=True).start()
         root.after(40, self._poll)
+
+    def _install_mac_rightclick(self):
+        """Mac：Tk 不一定收得到浮動圖案上的右鍵，所以用 macOS 原生事件接住：
+        在浮動小圖案（或它的小紅點）上按右鍵、或 Ctrl＋點，就彈出功能選單。其他地方交還給 Tk 照原本處理。"""
+        try:
+            from AppKit import NSEvent
+
+            def handler(ev):
+                try:
+                    t = int(ev.type())
+                    ctrl = bool(int(ev.modifierFlags()) & 0x40000)
+                    if t == 3 or (t == 1 and ctrl):  # 右鍵按下，或 Ctrl＋左鍵按下
+                        w = ev.window()
+                        title = str(w.title()) if w is not None else ""
+                        if title in ("sor-mini", "sor-dot-mini"):
+                            self.root.after(0, self._mini_menu_at_pointer)
+                            return None  # 這個事件我們處理掉
+                except Exception:
+                    log_error("rightclick: " + traceback.format_exc())
+                return ev
+
+            self._rc_monitor = NSEvent.addLocalMonitorForEventsMatchingMask_handler_((1 << 3) | (1 << 1), handler)
+        except Exception:
+            log_error("rightclick monitor: " + traceback.format_exc())
+
+    def _mini_menu_at_pointer(self):
+        self.mini._hide_tip()
+        x, y = self.root.winfo_pointerxy()
+        menu = self.build_menu(self.mini.win)
+        try:
+            menu.tk_popup(x, y)
+        finally:
+            menu.grab_release()
 
     @property
     def mini_mode(self):
