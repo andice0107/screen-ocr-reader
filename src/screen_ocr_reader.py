@@ -1114,7 +1114,7 @@ class MacGlobalHotkeys:
             def handler(call_ref, event, user_data):
                 try:
                     hk = EventHotKeyID()
-                    st = carbon.GetEventParameter(event, 0x2D2D2D2D, 0x68606964, None, C.sizeof(hk), None, C.byref(hk))
+                    st = carbon.GetEventParameter(event, 0x2D2D2D2D, 0x686B6964, None, C.sizeof(hk), None, C.byref(hk))
                     if st == 0 and hk.signature == self.SIGNATURE and hk.id != self.TEST_ID:
                         self.on_hotkey(int(hk.id))
                 except Exception:
