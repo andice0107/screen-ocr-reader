@@ -1236,6 +1236,28 @@ def mac_float(win, title, level=25, clear=False):
         log_error("mac_float: " + traceback.format_exc())
 
 
+def mac_round(title, radius):
+    """Mac：把視窗內容裁成圓形（Tk 的透明色在 Mac 上會留下黑色四角，這樣就變成正圓）。"""
+    if not IS_MAC:
+        return
+    try:
+        from AppKit import NSApp, NSColor
+
+        for w in NSApp.windows():
+            if str(w.title()) == title:
+                w.setOpaque_(False)
+                w.setBackgroundColor_(NSColor.clearColor())
+                w.setHasShadow_(False)
+                v = w.contentView()
+                v.setWantsLayer_(True)
+                layer = v.layer()
+                layer.setCornerRadius_(float(radius))
+                layer.setMasksToBounds_(True)
+                layer.setBackgroundColor_(None)
+    except Exception:
+        log_error("mac_round: " + traceback.format_exc())
+
+
 def mac_screen_access(request=False):
     """Mac：是否已允許「螢幕錄製」（沒允許時截到的圖只有桌面背景）。"""
     if not IS_MAC:
@@ -1398,7 +1420,7 @@ class MiniIcon:
         make_borderless(self.win, transparent=True, activates=False)
         self.win.attributes("-topmost", True)
         if IS_MAC:
-            self.KEY = "systemTransparent"
+            self.KEY = "#ffffff"  # 圓形外面由 mac_round 裁掉；圓和裁切邊之間的縫用白色補成白邊
         else:
             self.win.configure(bg=self.KEY)
             try:
@@ -1433,7 +1455,7 @@ class MiniIcon:
 
     def _redraw(self):
         s = self.size
-        pad = max(3, s // 12)
+        pad = max(2, s // 24) if IS_MAC else max(3, s // 12)
         c = self.canvas
         c.configure(width=s + pad * 2, height=s + pad * 2)
         c.delete("all")
@@ -1444,6 +1466,9 @@ class MiniIcon:
         label = {"busy": "⋯", "paused": "❚❚"}.get(self.state, "讀")
         c.create_text(pad + s / 2, pad + s / 2, text=label, fill="white",
                       font=(UI_FONT, -int(s * 0.46), "bold"))
+        if IS_MAC:
+            self.win.update_idletasks()
+            mac_round("sor-mini", (s + pad * 2) / 2)
 
     def _animate(self):
         if self.state == "speaking" and self.visible:
@@ -2015,7 +2040,7 @@ class RedDot:
         make_borderless(self.win, transparent=True, activates=False)
         self.win.attributes("-topmost", True)
         if IS_MAC:
-            self.KEY = "systemTransparent"
+            self.KEY = "#ffffff"  # 圓形外面由 mac_round 裁掉；圓和裁切邊之間的縫用白色補成白邊
         else:
             self.win.configure(bg=self.KEY)
             try:
@@ -2059,6 +2084,10 @@ class RedDot:
                                     outline="white", width=max(1, r // 6))
         self.win.attributes("-alpha", 0.03 + 0.97 * b)
         s = self.size
+        if IS_MAC and not getattr(self, "_rounded", False):
+            self._rounded = True
+            self.win.update_idletasks()
+            mac_round(f"sor-dot-{self.target}", s / 2)
         self.win.geometry(f"+{int(x - s / 2)}+{int(y - s / 2)}")
         if not self.shown:
             self.win.deiconify()
