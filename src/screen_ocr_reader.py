@@ -2255,8 +2255,22 @@ class App:
 
         if self.settings.get("x") is not None and self.settings.get("y") is not None:
             root.geometry(f"+{int(self.settings['x'])}+{int(self.settings['y'])}")
-        root.protocol("WM_DELETE_WINDOW", self.hide_to_tray)
+        # Windows：× 收到右下角；Mac：× 就是直接關掉程式（Cmd+Q 也一樣）
+        root.protocol("WM_DELETE_WINDOW", self.quit if IS_MAC else self.hide_to_tray)
+        if IS_MAC:
+            try:
+                root.createcommand("::tk::mac::Quit", self.quit)
+            except Exception:
+                pass
 
+        if IS_MAC:
+            try:
+                import signal
+
+                # 再次點開 app 時（第二個程式送來 SIGUSR1）→ 打開完整面板
+                signal.signal(signal.SIGUSR1, lambda *a: self.events.put(("tray", "panel")))
+            except Exception:
+                pass
         self.mini = MiniIcon(self)
         self.dots = {"panel": RedDot(self, "panel"), "mini": RedDot(self, "mini")}
         self.apply_alpha()
@@ -2595,7 +2609,8 @@ class App:
         m.add_command(label="⌨ 快捷鍵設定…", command=self.open_hotkeys)
         m.add_separator()
         m.add_command(label="🗔 打開完整面板", command=self.leave_mini)
-        m.add_command(label="⤓ 收到右下角圖示", command=self.hide_to_tray)
+        if not IS_MAC:
+            m.add_command(label="⤓ 收到右下角圖示", command=self.hide_to_tray)
         m.add_command(label="✖ 完全關閉程式", command=self.quit)
         return m
 
@@ -3195,9 +3210,18 @@ def main():
         try:
             fcntl.flock(_LOCK_FILE, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
-            os.system("osascript -e 'display dialog \"截圖朗讀小幫手已經在執行了（看螢幕最上方選單列右側的圖示）。\" "
-                      "buttons {\"好\"} default button 1 with icon note' >/dev/null 2>&1")
+            # 已經有一個在執行：請它把面板打開，自己就結束
+            try:
+                import signal
+
+                with open(os.path.join(data_dir(), "app.pid")) as f:
+                    os.kill(int(f.read().strip()), signal.SIGUSR1)
+            except Exception:
+                os.system("osascript -e 'display dialog \"截圖朗讀小幫手已經在執行了（看螢幕最上方選單列右側的圖示）。\" "
+                          "buttons {\"好\"} default button 1 with icon note' >/dev/null 2>&1")
             return
+        with open(os.path.join(data_dir(), "app.pid"), "w") as f:
+            f.write(str(os.getpid()))
     if IS_WINDOWS:
         ctypes.windll.kernel32.CreateMutexW(None, False, "ScreenOCRReader_SingleInstance")
         if ctypes.windll.kernel32.GetLastError() == 183:
